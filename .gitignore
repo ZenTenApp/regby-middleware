@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+.DS_Store
+# SQLite code store (+ WAL/SHM sidecars)
+plink.db
+*.db
+*.db-wal
+*.db-shm
+
+# Scratch notes — never commit
+plink*.txt
