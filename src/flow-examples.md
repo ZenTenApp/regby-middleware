@@ -1,7 +1,7 @@
-# Plink flow — event examples
+# ReGBY flow — event examples
 
 ```
-MID pubkey      = 4014be77...ac0951   (middleman, env PLINK_PRIVATE_KEY → derived)
+MID pubkey      = 4014be77...ac0951   (middleman, env REGBY_PRIVATE_KEY → derived)
 MERCHANT pubkey = a1a1...a1a1
 CUSTOMER pubkey = c0c0...c0c0
 ```
@@ -152,13 +152,13 @@ failure) or `["i","code"]` (mint failure), `["expiration", …]`.
 - Relay retention = NIP-40 `expiration` = `created_at + 1 h` on every event (maintenance buffer, unrelated to code validity).
 - **Active cleanup**: after a reply's 1-hour expiration, the middleman publishes a NIP-09 `kind 5`
   deletion referencing its own reply event ids (batched), since NIP-40 is advisory and not all relays honor
-  it. Example: `{ "kind":5, "tags":[["k","4"],["e","<reply-id>"],…], "content":"plink expired" }`. Only the
+  it. Example: `{ "kind":5, "tags":[["k","4"],["e","<reply-id>"],…], "content":"regby expired" }`. Only the
   middleman's own events — inbound merchant/customer events are theirs to delete.
-- **Persistence**: the code store is SQLite (`node:sqlite`, base `PLINK_DB_PATH`), so codes survive a
+- **Persistence**: the code store is SQLite (`node:sqlite`, base `REGBY_DB_PATH`), so codes survive a
   restart — a reboot no longer makes prior codes `Code Not Found`. The deletion queue stays in-memory
   (covers replies from the current process; older ones fall back to NIP-40 relay expiry), so there's no
   boot wipe of own events.
-- **Daily rotation**: a new SQLite file is opened per UTC day (`plink-YYYY-MM-DD.db` from `PLINK_DB_PATH`),
+- **Daily rotation**: a new SQLite file is opened per UTC day (`regby-YYYY-MM-DD.db` from `REGBY_DB_PATH`),
   switched at 00:00 UTC; old files are kept on disk. Only the current day's file is read/written, so a code
   minted just before midnight is unreachable after the roll (current-day-only). Each row also stores a
   `created_at` audit column (wall-clock mint time).

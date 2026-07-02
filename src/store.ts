@@ -156,7 +156,7 @@ function utcDayKey(epochSeconds: number): string {
   return `${d.getUTCFullYear()}-${mm}-${dd}`;
 }
 
-/** Insert the day key before the extension: `plink.db` → `plink-2026-06-29.db`. */
+/** Insert the day key before the extension: `regby.db` → `regby-2026-06-29.db`. */
 export function dailyDbPath(basePath: string, epochSeconds: number): string {
   const { dir, name, ext } = parse(basePath);
   const file = `${name}-${utcDayKey(epochSeconds)}${ext}`;
@@ -164,7 +164,7 @@ export function dailyDbPath(basePath: string, epochSeconds: number): string {
 }
 
 /**
- * A `CodeStore` that writes to a fresh SQLite file each UTC day (`plink-<date>.db`)
+ * A `CodeStore` that writes to a fresh SQLite file each UTC day (`regby-<date>.db`)
  * and switches at 00:00 UTC. Old files are KEPT on disk, never purged — a daily
  * archive. The active store is the only one read or written.
  *

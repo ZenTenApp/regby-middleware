@@ -1,6 +1,6 @@
-# plink-middleware
+# regby-middleware
 
-Nostr middleman broker for **Plink** — BLIK-style coded payment requests for the
+Nostr middleman broker for **ReGBY** — BLIK-style coded payment requests for the
 zenten-pay wallet. A merchant encrypts a `defipay://` request to this server's
 npub; the server mints a short **8-digit code** and returns it. A customer
 redeems the code; the server returns the original URI. Every hop is a
@@ -45,11 +45,11 @@ eight-digit code — no JSON wrapper.
   event's `created_at`**, not server receive-time, so the merchant POS and the
   server count down from the same origin — the merchant already knows that
   timestamp (it signed the event), so no echo is needed. `created_at` is
-  skew-clamped (`PLINK_CLOCK_SKEW_SECONDS`) to stop a forged future/stale stamp
+  skew-clamped (`REGBY_CLOCK_SKEW_SECONDS`) to stop a forged future/stale stamp
   from gaming expiry.
 - A `request_code` whose decrypted payload is **not** `defipay://` is treated as
   a deliberate bad request: the server replies `i:code` with `Invalid Request`
-  (not a code) and **blacklists the sender for 24 h** (`PLINK_BLACKLIST_SECONDS`).
+  (not a code) and **blacklists the sender for 24 h** (`REGBY_BLACKLIST_SECONDS`).
   Undecryptable noise and malformed codes are still dropped silently.
 - **request_uri** → look up the code. Valid → reply `i:uri` with the URI.
   **Multi-use**: the code is *not* consumed — any number of customers can redeem
@@ -57,13 +57,13 @@ eight-digit code — no JSON wrapper.
   `created_at`) → `i:uri` `Code Expired`; never minted or past retention →
   `i:uri` `Code Not Found` (reason in `content`, not a URI).
 - **Persistence**: the code store is **SQLite** (`node:sqlite`, file derived from
-  `PLINK_DB_PATH`), so codes survive a restart — a reboot no longer makes every
+  `REGBY_DB_PATH`), so codes survive a restart — a reboot no longer makes every
   code `Code Not Found`. Each row carries `created_at` (wall-clock mint, audit
   only), `expires_at` (validity) and `retain_until`
-  (`created_at + PLINK_CODE_RETAIN_SECONDS`); rows past retention are swept on a
+  (`created_at + REGBY_CODE_RETAIN_SECONDS`); rows past retention are swept on a
   60s timer (also stale rate buckets + blacklist entries).
 - **Daily rotation**: a new SQLite file is opened per **UTC day**
-  (`plink-YYYY-MM-DD.db` derived from `PLINK_DB_PATH`), switched at 00:00 UTC; old
+  (`regby-YYYY-MM-DD.db` derived from `REGBY_DB_PATH`), switched at 00:00 UTC; old
   files are kept on disk as a daily archive. Only the current day's file is read
   or written — a code minted just before midnight is unreachable after the roll
   even within its retention window (a deliberate current-day-only trade).
@@ -83,13 +83,13 @@ eight-digit code — no JSON wrapper.
 
 ### Safeguards
 
-- Per-sender sliding-window rate limit (`PLINK_RATE_MAX` / window).
-- Global redeem rate ceiling (`PLINK_REDEEM_RATE_MAX`) plus per-sender
-  not-found strikes (`PLINK_REDEEM_FAIL_MAX` → blacklist): bounds code-space
+- Per-sender sliding-window rate limit (`REGBY_RATE_MAX` / window).
+- Global redeem rate ceiling (`REGBY_REDEEM_RATE_MAX`) plus per-sender
+  not-found strikes (`REGBY_REDEEM_FAIL_MAX` → blacklist): bounds code-space
   enumeration / URI harvesting even by an attacker rotating fresh pubkeys.
 - 24 h blacklist for senders that submit a malicious `request_code`.
 - Code-TTL anchor (`created_at`) skew-clamped so expiry can't be gamed.
-- Store capacity cap (`PLINK_STORE_MAX`) — mints past it reply `i:code` with
+- Store capacity cap (`REGBY_STORE_MAX`) — mints past it reply `i:code` with
   `Service Busy, Try Again` (a reason, not a code).
 - Processed event ids are remembered so a relay re-delivery can't double-mint.
 - Strict content validation; length caps.
@@ -104,7 +104,7 @@ eight-digit code — no JSON wrapper.
 ## Run
 
 ```bash
-cp .env.example .env      # set PLINK_PRIVATE_KEY + PLINK_RELAYS
+cp .env.example .env      # set REGBY_PRIVATE_KEY + REGBY_RELAYS
 npm install
 npm run typecheck
 npm test
@@ -114,7 +114,7 @@ npm run build && npm start
 ```
 
 The boot log prints the derived public key — copy it into the app's
-`PLINK_MIDDLEMAN_PUBKEY` constant. Set `PLINK_EXPECTED_PUBKEY` to have the server
+`REGBY_MIDDLEMAN_PUBKEY` constant. Set `REGBY_EXPECTED_PUBKEY` to have the server
 assert that match itself.
 
 ## Layout

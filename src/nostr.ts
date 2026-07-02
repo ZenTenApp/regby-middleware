@@ -1,5 +1,5 @@
 /**
- * Nostr transport: relay pool, NIP-44 encrypt/decrypt, and plink event
+ * Nostr transport: relay pool, NIP-44 encrypt/decrypt, and regby event
  * build/publish. The middleman secret key never leaves this module's closure.
  */
 import { SimplePool, useWebSocketImplementation } from 'nostr-tools/pool';
@@ -7,7 +7,7 @@ import { finalizeEvent } from 'nostr-tools/pure';
 import { nip44 } from 'nostr-tools';
 import type { Event, Filter } from 'nostr-tools';
 import WebSocket from 'ws';
-import { PLINK_KIND, INTENT_TAG, INBOUND_INTENTS, type OutboundIntent } from './protocol.ts';
+import { REGBY_KIND, INTENT_TAG, INBOUND_INTENTS, type OutboundIntent } from './protocol.ts';
 import { DeletionQueue } from './deletion-queue.ts';
 import { BoundedMap } from './bounded-map.ts';
 import { nowSeconds } from './time.ts';
@@ -29,8 +29,8 @@ export interface ReplyTarget {
   requestEventId: string;
 }
 
-export interface PlinkTransport {
-  /** Subscribe to inbound plink events addressed to the middleman. */
+export interface ReGBYTransport {
+  /** Subscribe to inbound regby events addressed to the middleman. */
   subscribe(onEvent: (event: Event) => void): { close: () => void };
   /** Encrypt + sign + publish a raw-content reply of `intent` to a target. */
   reply(target: ReplyTarget, intent: OutboundIntent, content: string): Promise<void>;
@@ -46,7 +46,7 @@ export function createTransport(
   publicKey: string,
   relays: string[],
   eventExpirySeconds: number,
-): PlinkTransport {
+): ReGBYTransport {
   const pool = new SimplePool();
   const deletions = new DeletionQueue();
 
@@ -72,8 +72,8 @@ export function createTransport(
         {
           kind: DELETION_KIND,
           created_at: nowSeconds(),
-          tags: [['k', String(PLINK_KIND)], ...batch.map((id) => ['e', id])],
-          content: 'plink expired',
+          tags: [['k', String(REGBY_KIND)], ...batch.map((id) => ['e', id])],
+          content: 'regby expired',
         },
         secretKey,
       );
@@ -95,7 +95,7 @@ export function createTransport(
 
       const openSub = (since: number, initial: boolean): { close: () => void } => {
         const filter: Filter = {
-          kinds: [PLINK_KIND],
+          kinds: [REGBY_KIND],
           '#p': [publicKey],
           '#i': [...INBOUND_INTENTS],
           since,
@@ -136,7 +136,7 @@ export function createTransport(
       const expiresAt = now + eventExpirySeconds;
       const event = finalizeEvent(
         {
-          kind: PLINK_KIND,
+          kind: REGBY_KIND,
           created_at: now,
           tags: [
             ['p', target.recipientPubkey],

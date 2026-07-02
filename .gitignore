@@ -5,10 +5,10 @@ dist/
 *.log
 .DS_Store
 # SQLite code store (+ WAL/SHM sidecars)
-plink.db
+regby.db
 *.db
 *.db-wal
 *.db-shm
 
 # Scratch notes — never commit
-plink*.txt
+regby*.txt

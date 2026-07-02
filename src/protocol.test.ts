@@ -12,7 +12,7 @@ test('extractIntent reads a known i tag', () => {
 
 test('extractIntent rejects unknown / absent', () => {
   assert.equal(extractIntent([['i', 'bogus']]), null);
-  assert.equal(extractIntent([['p', 'x'], ['t', 'plink']]), null);
+  assert.equal(extractIntent([['p', 'x'], ['t', 'regby']]), null);
   assert.equal(extractIntent([]), null);
 });
 

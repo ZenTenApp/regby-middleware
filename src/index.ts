@@ -3,19 +3,19 @@
  */
 import { loadConfig } from './config.ts';
 import { configureLogger, logger } from './logger.ts';
-import { PlinkBroker } from './server.ts';
+import { ReGBYBroker } from './server.ts';
 
 function main(): void {
   const config = loadConfig();
   configureLogger(config.logLevel);
 
-  logger.info('plink-middleware booting', {
+  logger.info('regby-middleware booting', {
     pubkey: config.publicKey,
     relays: config.relays,
     codeTtlSeconds: config.codeTtlSeconds,
   });
 
-  const broker = new PlinkBroker(config);
+  const broker = new ReGBYBroker(config);
   broker.start();
 
   const shutdown = (signal: string): void => {

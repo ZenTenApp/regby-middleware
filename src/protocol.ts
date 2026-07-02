@@ -1,6 +1,6 @@
 /**
- * Plink wire protocol — the single source of truth for the encrypted DM shapes
- * exchanged between the app and this middleman, mirroring `utils/plink.ts` in
+ * ReGBY wire protocol — the single source of truth for the encrypted DM shapes
+ * exchanged between the app and this middleman, mirroring `utils/regby.ts` in
  * the wallet app.
  *
  * Transport is a standard encrypted **DM (kind 4)** so events are treated as
@@ -10,7 +10,7 @@
  *     eight-digit code. No JSON wrapper.
  *   - the message **intent** rides a plaintext `['i', <intent>]` tag —
  *     single-letter `i` is relay-indexable, so the server subscribes
- *     `#i:['request_code','request_uri']` and pulls only inbound plink traffic.
+ *     `#i:['request_code','request_uri']` and pulls only inbound regby traffic.
  *   - replies carry `['e', <request-event-id>]` (Nostr-native reply linkage)
  *     so the client matches a reply to the request it published — no in-band
  *     correlation id needed.
@@ -27,13 +27,13 @@
  */
 
 /** Encrypted DM kind (NIP-04 envelope, NIP-44 ciphertext content). */
-export const PLINK_KIND = 4;
+export const REGBY_KIND = 4;
 
 /** Scheme every line of a payment-request URI must use. */
 export const DEFIPAY_PREFIX = 'defipay://';
 
 /** Codes are exactly eight decimal digits. */
-export const PLINK_CODE_RE = /^\d{8}$/;
+export const REGBY_CODE_RE = /^\d{8}$/;
 
 /** Upper bound on decrypted content we accept (multi-line URIs included). */
 export const MAX_CONTENT_LENGTH = 4096;
@@ -41,13 +41,13 @@ export const MAX_CONTENT_LENGTH = 4096;
 /** Intent tag key. */
 export const INTENT_TAG = 'i';
 
-export type PlinkIntent = 'request_code' | 'code' | 'request_uri' | 'uri';
+export type ReGBYIntent = 'request_code' | 'code' | 'request_uri' | 'uri';
 
 /** The two intents the middleman emits — a failure reuses the matching one. */
-export type OutboundIntent = Extract<PlinkIntent, 'code' | 'uri'>;
+export type OutboundIntent = Extract<ReGBYIntent, 'code' | 'uri'>;
 
 /** The two intents the middleman accepts from clients. */
-export type InboundIntent = Extract<PlinkIntent, 'request_code' | 'request_uri'>;
+export type InboundIntent = Extract<ReGBYIntent, 'request_code' | 'request_uri'>;
 
 /** Inbound intents as a value list — feeds the relay `#i` subscription filter. */
 export const INBOUND_INTENTS: readonly InboundIntent[] = ['request_code', 'request_uri'];
@@ -110,7 +110,7 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
 
   // request_uri
   const code = content.trim();
-  if (!PLINK_CODE_RE.test(code)) return { ok: false, reason: 'silent' };
+  if (!REGBY_CODE_RE.test(code)) return { ok: false, reason: 'silent' };
   return { ok: true, message: { intent, code } };
 }
 

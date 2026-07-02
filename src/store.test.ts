@@ -98,7 +98,7 @@ test('sweep frees capacity taken by rows past retention', () => {
 });
 
 test('mint records created_at = server now', () => {
-  const path = join(tmpdir(), `plink-created-${process.pid}.db`);
+  const path = join(tmpdir(), `regby-created-${process.pid}.db`);
   const now = 1_700_000_000;
   try {
     const store = new CodeStore(TTL, RETAIN, 100, path, () => now);
@@ -118,14 +118,14 @@ test('mint records created_at = server now', () => {
 
 test('dailyDbPath inserts the UTC day before the extension', () => {
   // 1_700_000_000 = 2023-11-14T22:13:20Z
-  assert.equal(dailyDbPath('plink.db', 1_700_000_000), 'plink-2023-11-14.db');
-  assert.equal(dailyDbPath('/data/plink.db', 1_700_000_000), '/data/plink-2023-11-14.db');
-  assert.equal(dailyDbPath('plinkdb', 1_700_000_000), 'plinkdb-2023-11-14'); // no extension
+  assert.equal(dailyDbPath('regby.db', 1_700_000_000), 'regby-2023-11-14.db');
+  assert.equal(dailyDbPath('/data/regby.db', 1_700_000_000), '/data/regby-2023-11-14.db');
+  assert.equal(dailyDbPath('regbydb', 1_700_000_000), 'regbydb-2023-11-14'); // no extension
 });
 
 test('RotatingCodeStore switches files at the UTC day boundary', () => {
   const clock = fixedClock(1_700_000_000);
-  const base = join(tmpdir(), `plink-rot-${process.pid}.db`);
+  const base = join(tmpdir(), `regby-rot-${process.pid}.db`);
   const day1 = dailyDbPath(base, clock.now());
   try {
     const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
@@ -149,7 +149,7 @@ test('RotatingCodeStore switches files at the UTC day boundary', () => {
 });
 
 test('codes persist across a restart (reopen the same file)', () => {
-  const path = join(tmpdir(), `plink-store-test-${process.pid}.db`);
+  const path = join(tmpdir(), `regby-store-test-${process.pid}.db`);
   const now = 1_000_000;
   try {
     const first = new CodeStore(TTL, RETAIN, 100, path, () => now);

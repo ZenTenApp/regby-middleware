@@ -1,5 +1,5 @@
 /**
- * Plink broker. Wires the transport, store, and rate limiter together and
+ * ReGBY broker. Wires the transport, store, and rate limiter together and
  * dispatches inbound events:
  *   request_code → mint a code, reply `i:code` (content = code, or a reason
  *                  string on failure)
@@ -11,7 +11,7 @@
  */
 import type { Event } from 'nostr-tools';
 import type { Config } from './config.ts';
-import { createTransport, type PlinkTransport, type ReplyTarget } from './nostr.ts';
+import { createTransport, type ReGBYTransport, type ReplyTarget } from './nostr.ts';
 import { RotatingCodeStore, type CodeStoreLike } from './store.ts';
 import { RateLimiter } from './rate-limit.ts';
 import { Blacklist } from './blacklist.ts';
@@ -26,8 +26,8 @@ const SEEN_MAX = 50_000;
 /** Single bucket key for the global (all-sender) redeem limiter. */
 const GLOBAL_REDEEM_KEY = 'all';
 
-export class PlinkBroker {
-  private readonly transport: PlinkTransport;
+export class ReGBYBroker {
+  private readonly transport: ReGBYTransport;
   private readonly store: CodeStoreLike;
   private readonly limiter: RateLimiter;
   // Aggregate redeem cap across every sender — a per-pubkey limit alone can't
