@@ -116,11 +116,11 @@ test('mint records created_at = server now', () => {
   }
 });
 
-test('dailyDbPath inserts the UTC day before the extension', () => {
+test('dailyDbPath nests the file under YYYY/MM folders', () => {
   // 1_700_000_000 = 2023-11-14T22:13:20Z
-  assert.equal(dailyDbPath('regby.db', 1_700_000_000), 'regby-2023-11-14.db');
-  assert.equal(dailyDbPath('/data/regby.db', 1_700_000_000), '/data/regby-2023-11-14.db');
-  assert.equal(dailyDbPath('regbydb', 1_700_000_000), 'regbydb-2023-11-14'); // no extension
+  assert.equal(dailyDbPath('regby.db', 1_700_000_000), '2023/11/regby-2023-11-14.db');
+  assert.equal(dailyDbPath('/data/regby.db', 1_700_000_000), '/data/2023/11/regby-2023-11-14.db');
+  assert.equal(dailyDbPath('regbydb', 1_700_000_000), '2023/11/regbydb-2023-11-14'); // no extension
 });
 
 test('RotatingCodeStore switches files at the UTC day boundary', () => {

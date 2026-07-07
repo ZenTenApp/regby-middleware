@@ -21,7 +21,8 @@
  */
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { randomInt } from 'node:crypto';
-import { join, parse } from 'node:path';
+import { mkdirSync } from 'node:fs';
+import { dirname, join, parse } from 'node:path';
 import { nowSeconds } from './time.ts';
 
 export interface MintResult {
@@ -67,6 +68,8 @@ export class CodeStore implements CodeStoreLike {
     dbPath: string,
     private readonly now: () => number = nowSeconds,
   ) {
+    // SQLite won't create missing parent dirs; the daily path nests YYYY/MM.
+    mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     // WAL keeps reads/writes from blocking each other and survives a hard crash.
     this.db.exec('PRAGMA journal_mode = WAL');
@@ -156,16 +159,24 @@ function utcDayKey(epochSeconds: number): string {
   return `${d.getUTCFullYear()}-${mm}-${dd}`;
 }
 
-/** Insert the day key before the extension: `regby.db` → `regby-2026-06-29.db`. */
+/**
+ * Nest the daily file under year/month folders, day key in the name:
+ * `regby.db` → `2026/06/regby-2026-06-29.db`. Folders are relative to the base
+ * path's directory (empty for a bare filename).
+ */
 export function dailyDbPath(basePath: string, epochSeconds: number): string {
   const { dir, name, ext } = parse(basePath);
+  const d = new Date(epochSeconds * 1000);
+  const year = String(d.getUTCFullYear());
+  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
   const file = `${name}-${utcDayKey(epochSeconds)}${ext}`;
-  return dir ? join(dir, file) : file;
+  return join(dir, year, month, file);
 }
 
 /**
- * A `CodeStore` that writes to a fresh SQLite file each UTC day (`regby-<date>.db`)
- * and switches at 00:00 UTC. Old files are KEPT on disk, never purged — a daily
+ * A `CodeStore` that writes to a fresh SQLite file each UTC day, nested under
+ * `YYYY/MM/regby-<date>.db`, and switches at 00:00 UTC. Old files are KEPT on
+ * disk, never purged — a daily
  * archive. The active store is the only one read or written.
  *
  * **Current-day-only**: a code lives solely in the file of the day it was minted.

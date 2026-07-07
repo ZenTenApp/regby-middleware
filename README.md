@@ -63,7 +63,7 @@ eight-digit code — no JSON wrapper.
   (`created_at + REGBY_CODE_RETAIN_SECONDS`); rows past retention are swept on a
   60s timer (also stale rate buckets + blacklist entries).
 - **Daily rotation**: a new SQLite file is opened per **UTC day**
-  (`regby-YYYY-MM-DD.db` derived from `REGBY_DB_PATH`), switched at 00:00 UTC; old
+  (nested `YYYY/MM/regby-YYYY-MM-DD.db` derived from `REGBY_DB_PATH`), switched at 00:00 UTC; old
   files are kept on disk as a daily archive. Only the current day's file is read
   or written — a code minted just before midnight is unreachable after the roll
   even within its retention window (a deliberate current-day-only trade).

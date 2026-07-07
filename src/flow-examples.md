@@ -158,7 +158,7 @@ failure) or `["i","code"]` (mint failure), `["expiration", …]`.
   restart — a reboot no longer makes prior codes `Code Not Found`. The deletion queue stays in-memory
   (covers replies from the current process; older ones fall back to NIP-40 relay expiry), so there's no
   boot wipe of own events.
-- **Daily rotation**: a new SQLite file is opened per UTC day (`regby-YYYY-MM-DD.db` from `REGBY_DB_PATH`),
+- **Daily rotation**: a new SQLite file is opened per UTC day (nested `YYYY/MM/regby-YYYY-MM-DD.db` from `REGBY_DB_PATH`),
   switched at 00:00 UTC; old files are kept on disk. Only the current day's file is read/written, so a code
   minted just before midnight is unreachable after the roll (current-day-only). Each row also stores a
   `created_at` audit column (wall-clock mint time).

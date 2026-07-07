@@ -1,0 +1,12 @@
+services:
+  regby:
+    build: .
+    image: regby-middleware
+    container_name: regby
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - regby-data:/data
+
+volumes:
+  regby-data:
