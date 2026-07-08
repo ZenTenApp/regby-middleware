@@ -67,14 +67,19 @@ eight-digit code — no JSON wrapper.
   files are kept on disk as a daily archive. Only the current day's file is read
   or written — a code minted just before midnight is unreachable after the roll
   even within its retention window (a deliberate current-day-only trade).
-- **Active deletion**: once a reply's 1-hour `expiration` lapses, the server
-  publishes a **NIP-09 `kind 5`** deletion for its own reply events (batched).
-  NIP-40 expiration is advisory — many relays ignore it — so we delete actively.
-  Only the middleman's own events; inbound merchant/customer events are theirs to
-  delete. The deletion queue is in-memory, so it covers replies from the current
-  process lifetime; older replies fall back to NIP-40 relay expiry. (There is no
-  boot wipe of own events anymore — codes persist, so prior replies aren't
-  orphaned.)
+- **Active deletion**: once a reply's `expiration` lapses, the server publishes a
+  **NIP-09 `kind 5`** deletion for its own reply events (batched). NIP-40
+  expiration is advisory — many relays ignore it — so we delete actively. Only the
+  middleman's own events; inbound merchant/customer events are theirs to delete.
+  The deletion queue is in-memory, so it covers replies from the current process
+  lifetime; older replies fall back to NIP-40 relay expiry. (There is no boot wipe
+  of own events anymore — codes persist, so prior replies aren't orphaned.) NB: on
+  the dedicated `wss://dm1.zentext.me` relay (kind 4 ONLY), these kind-5 deletions
+  are rejected, so active deletion no-ops there — retention then rests entirely on
+  the NIP-40 `expiration` tag, which that relay enforces (and caps at 72h).
+- **Dedicated DM relay**: ReGby runs on `wss://dm1.zentext.me` — operator-run,
+  ReGby-only, kind 4 ONLY, NIP-40 expiration capped at 72h, content capped at
+  4 KB. `REGBY_RELAYS` must match the app's `config/nostr.ts → REGBY_RELAYS`.
 - **Subscription keep-alive**: a single long-lived REQ goes deaf when a relay
   drops the idle connection (nostr-tools won't re-open it), so the server
   re-subscribes every 120s (re-opening any dropped socket). The new REQ overlaps

@@ -57,6 +57,14 @@ function intEnv(name: string, fallback: number): number {
 
 const HEX64_RE = /^[0-9a-f]{64}$/i;
 
+/**
+ * Hard ceiling the dedicated ReGby DM relay (`wss://dm1.zentext.me`) puts on
+ * NIP-40 expiration: it drops any event stamped further out than 72h. Every
+ * reply we publish carries `eventExpirySeconds`, so a value above this would
+ * silently get every reply bounced. Fail loud at boot instead.
+ */
+const REGBY_RELAY_MAX_EXPIRY_SECONDS = 72 * 60 * 60;
+
 /** Decode a 64-char hex private key to raw secret bytes. */
 function parseSecretKey(value: string): Uint8Array {
   if (!HEX64_RE.test(value)) {
@@ -96,6 +104,13 @@ export function loadConfig(): Config {
     throw new Error('REGBY_CODE_RETAIN_SECONDS must be >= REGBY_CODE_TTL_SECONDS');
   }
 
+  const eventExpirySeconds = intEnv('REGBY_EVENT_EXPIRY_SECONDS', 3600);
+  if (eventExpirySeconds > REGBY_RELAY_MAX_EXPIRY_SECONDS) {
+    throw new Error(
+      `REGBY_EVENT_EXPIRY_SECONDS (${eventExpirySeconds}) exceeds the DM relay max (${REGBY_RELAY_MAX_EXPIRY_SECONDS} = 72h)`,
+    );
+  }
+
   return {
     secretKey,
     publicKey,
@@ -103,7 +118,7 @@ export function loadConfig(): Config {
     codeTtlSeconds,
     codeRetainSeconds,
     dbPath: process.env.REGBY_DB_PATH?.trim() || 'regby.db',
-    eventExpirySeconds: intEnv('REGBY_EVENT_EXPIRY_SECONDS', 3600),
+    eventExpirySeconds,
     clockSkewSeconds: intEnv('REGBY_CLOCK_SKEW_SECONDS', 120),
     rateMax: intEnv('REGBY_RATE_MAX', 30),
     rateWindowSeconds: intEnv('REGBY_RATE_WINDOW_SECONDS', 60),
