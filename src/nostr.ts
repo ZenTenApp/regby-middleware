@@ -3,7 +3,7 @@
  * build/publish. The middleman secret key never leaves this module's closure.
  */
 import { SimplePool, useWebSocketImplementation } from 'nostr-tools/pool';
-import { finalizeEvent } from 'nostr-tools/pure';
+import { type EventTemplate, finalizeEvent, type VerifiedEvent } from 'nostr-tools/pure';
 import { nip44 } from 'nostr-tools';
 import type { Event, Filter } from 'nostr-tools';
 import WebSocket from 'ws';
@@ -50,6 +50,13 @@ export function createTransport(
   const pool = new SimplePool();
   const deletions = new DeletionQueue();
 
+  // dm1 gates write (and may gate read) operations behind NIP-42 AUTH. On the
+  // relay's `auth-required` challenge, sign its kind-22242 template with the
+  // middleman key so publish/subscribe is authorised. Fires only on an actual
+  // challenge — an open relay never invokes it, so this is safe if AUTH is off.
+  const onauth = (evt: EventTemplate): Promise<VerifiedEvent> =>
+    Promise.resolve(finalizeEvent(evt, secretKey));
+
   // Per-peer NIP-44 conversation key — symmetric, so the same key decrypts the
   // inbound event and encrypts the reply. Deriving it is an ECDH op, so cache
   // per peer; the BoundedMap caps the cache so a flood of distinct senders can't
@@ -77,7 +84,7 @@ export function createTransport(
         },
         secretKey,
       );
-      await Promise.allSettled(pool.publish(relays, event));
+      await Promise.allSettled(pool.publish(relays, event, { onauth }));
       logger.debug('Published deletion', { count: batch.length });
     }
   };
@@ -102,6 +109,7 @@ export function createTransport(
         };
         logger[initial ? 'info' : 'debug']('Subscribing', { relays, since });
         return pool.subscribeMany(relays, filter, {
+          onauth,
           onevent: onEvent,
           oneose: () => logger.debug('Relays reached end of stored events'),
         });
@@ -150,7 +158,7 @@ export function createTransport(
       );
       // Track for active NIP-09 deletion once the advisory expiry lapses.
       deletions.add(event.id, expiresAt);
-      const results = await Promise.allSettled(pool.publish(relays, event));
+      const results = await Promise.allSettled(pool.publish(relays, event, { onauth }));
       const accepted = results.filter((r) => r.status === 'fulfilled').length;
       logger.debug('Published reply', {
         intent,
