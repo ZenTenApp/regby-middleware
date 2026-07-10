@@ -50,8 +50,8 @@ export function createTransport(
   const pool = new SimplePool();
   const deletions = new DeletionQueue();
 
-  // dm1 gates write (and may gate read) operations behind NIP-42 AUTH. On the
-  // relay's `auth-required` challenge, sign its kind-22242 template with the
+  // The DM relays gate write (and may gate read) operations behind NIP-42 AUTH.
+  // On a relay's `auth-required` challenge, sign its kind-22242 template with the
   // middleman key so publish/subscribe is authorised. Fires only on an actual
   // challenge — an open relay never invokes it, so this is safe if AUTH is off.
   const onauth = (evt: EventTemplate): Promise<VerifiedEvent> =>

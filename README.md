@@ -74,11 +74,13 @@ eight-digit code — no JSON wrapper.
   The deletion queue is in-memory, so it covers replies from the current process
   lifetime; older replies fall back to NIP-40 relay expiry. (There is no boot wipe
   of own events anymore — codes persist, so prior replies aren't orphaned.) NB: on
-  the dedicated `wss://dm1.zentext.me` relay (kind 4 ONLY), these kind-5 deletions
+  the dedicated `wss://dm1.zentext.me` / `wss://dm2.zentext.me` relays (kind 4
+  ONLY), these kind-5 deletions
   are rejected, so active deletion no-ops there — retention then rests entirely on
-  the NIP-40 `expiration` tag, which that relay enforces (and caps at 72h).
-- **Dedicated DM relay**: ReGby runs on `wss://dm1.zentext.me` — operator-run,
-  ReGby-only, kind 4 ONLY, NIP-40 expiration capped at 72h, content capped at
+  the NIP-40 `expiration` tag, which those relays enforce (and cap at 72h).
+- **Dedicated DM relays**: ReGBY runs on `wss://dm1.zentext.me` and
+  `wss://dm2.zentext.me` — operator-run,
+  ReGBY-only, kind 4 ONLY, NIP-40 expiration capped at 72h, content capped at
   4 KB. `REGBY_RELAYS` must match the app's `config/nostr.ts → REGBY_RELAYS`.
 - **Subscription keep-alive**: a single long-lived REQ goes deaf when a relay
   drops the idle connection (nostr-tools won't re-open it), so the server

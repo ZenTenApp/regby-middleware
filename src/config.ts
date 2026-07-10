@@ -58,8 +58,9 @@ function intEnv(name: string, fallback: number): number {
 const HEX64_RE = /^[0-9a-f]{64}$/i;
 
 /**
- * Hard ceiling the dedicated ReGby DM relay (`wss://dm1.zentext.me`) puts on
- * NIP-40 expiration: it drops any event stamped further out than 72h. Every
+ * Hard ceiling the dedicated ReGBY DM relays (`wss://dm1.zentext.me`,
+ * `wss://dm2.zentext.me`) put on
+ * NIP-40 expiration: they drop any event stamped further out than 72h. Every
  * reply we publish carries `eventExpirySeconds`, so a value above this would
  * silently get every reply bounced. Fail loud at boot instead.
  */
