@@ -16,6 +16,14 @@ import { logger } from './logger.ts';
 /** NIP-09 deletion request kind. */
 const DELETION_KIND = 5;
 
+/**
+ * The DM relays REJECT any write without a `client` tag
+ * (`invalid: missing required tag: client`), so every event we publish carries
+ * one. The app tags its own events the same way (`clientTag()` in the app's
+ * `config/nostr.ts`).
+ */
+const CLIENT_TAG: string[] = ['client', 'regby-middleware'];
+
 /** Max `e` refs per deletion event — chunk larger batches across events. */
 const MAX_DELETE_REFS = 500;
 
@@ -143,7 +151,7 @@ export function createTransport(
         {
           kind: DELETION_KIND,
           created_at: nowSeconds(),
-          tags: [['k', String(REGBY_KIND)], ...batch.map((id) => ['e', id])],
+          tags: [['k', String(REGBY_KIND)], ...batch.map((id) => ['e', id]), CLIENT_TAG],
           content: 'regby expired',
         },
         secretKey,
@@ -235,6 +243,7 @@ export function createTransport(
             ['e', target.requestEventId],
             [INTENT_TAG, intent],
             ['expiration', String(expiresAt)],
+            CLIENT_TAG,
           ],
           content: ciphertext,
         },
