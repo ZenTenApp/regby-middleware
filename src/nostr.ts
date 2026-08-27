@@ -41,6 +41,22 @@ export interface ReGBYTransport {
   close(): void;
 }
 
+/**
+ * Per-relay rejection reasons from a `pool.publish` settle. A relay's OK:false
+ * message, an AUTH refusal, or a socket failure all land here — without them an
+ * `accepted: 0` publish says nothing about why.
+ */
+function collectRejections(
+  results: PromiseSettledResult<unknown>[],
+  relays: string[],
+): { relay: string; reason: string }[] {
+  return results.flatMap((r, i) =>
+    r.status === 'rejected'
+      ? [{ relay: relays[i] ?? 'unknown', reason: r.reason instanceof Error ? r.reason.message : String(r.reason) }]
+      : [],
+  );
+}
+
 export function createTransport(
   secretKey: Uint8Array,
   publicKey: string,
@@ -56,6 +72,54 @@ export function createTransport(
   // challenge — an open relay never invokes it, so this is safe if AUTH is off.
   const onauth = (evt: EventTemplate): Promise<VerifiedEvent> =>
     Promise.resolve(finalizeEvent(evt, secretKey));
+
+  // AUTH must complete BEFORE the first REQ/EVENT, not merely be reachable.
+  // nostr-tools sends a subscription's REQ (and a publish's EVENT) the moment
+  // the socket opens and only auths reactively, when the relay's `AUTH` frame
+  // arrives (abstract-relay `case "AUTH"`). The two DM relays refuse an
+  // unauthenticated kind-4 read differently, and only one of the refusals is
+  // recoverable on its own:
+  //   - dm1 (ORLY) CLOSEs the sub with `auth-required:`, which nostr-tools
+  //     answers by authing and re-issuing the REQ internally.
+  //   - dm2 (nostr-rs-relay) returns a plain EOSE with zero events. No error,
+  //     no CLOSED — so nothing tells nostr-tools to redo the REQ and the
+  //     subscription stays deaf for the life of that connection.
+  // Waiting for the challenge and awaiting `relay.auth` first makes both
+  // behave. `connect()` clears `challenge`/`authPromise` per connection and
+  // `auth()` returns the in-flight promise, so this is idempotent and cheap
+  // once authed.
+  const AUTH_WAIT_MS = 3_000;
+  const AUTH_POLL_MS = 50;
+
+  // `relay.challenge` is private in nostr-tools' types, so poll `auth()` itself:
+  // before the challenge lands it throws "can't perform auth, no challenge was
+  // received", which is a retry, not a failure.
+  const isMissingChallenge = (err: unknown): boolean =>
+    err instanceof Error && err.message.includes('no challenge');
+
+  const authenticateRelay = async (url: string): Promise<void> => {
+    const relay = await pool.ensureRelay(url);
+    const deadline = Date.now() + AUTH_WAIT_MS;
+    for (;;) {
+      try {
+        await relay.auth(onauth);
+        return;
+      } catch (err) {
+        if (!isMissingChallenge(err)) throw err;
+        // Still no challenge by the deadline: an open relay (AUTH never
+        // offered) or one too slow. Proceed unauthenticated rather than stall
+        // the broker — a gated relay then refuses, and the caller logs it.
+        if (Date.now() >= deadline) return;
+        await new Promise((resolve) => setTimeout(resolve, AUTH_POLL_MS));
+      }
+    }
+  };
+
+  const ensureAuthed = async (): Promise<void> => {
+    const results = await Promise.allSettled(relays.map(authenticateRelay));
+    const failures = collectRejections(results, relays);
+    if (failures.length > 0) logger.warn('Relay AUTH failed', { failures });
+  };
 
   // Per-peer NIP-44 conversation key — symmetric, so the same key decrypts the
   // inbound event and encrypts the reply. Deriving it is an ECDH op, so cache
@@ -84,8 +148,14 @@ export function createTransport(
         },
         secretKey,
       );
-      await Promise.allSettled(pool.publish(relays, event, { onauth }));
-      logger.debug('Published deletion', { count: batch.length });
+      await ensureAuthed();
+      const results = await Promise.allSettled(pool.publish(relays, event, { onauth }));
+      const rejections = collectRejections(results, relays);
+      logger.debug('Published deletion', {
+        count: batch.length,
+        accepted: results.filter((r) => r.status === 'fulfilled').length,
+        ...(rejections.length > 0 ? { rejections } : {}),
+      });
     }
   };
 
@@ -115,18 +185,32 @@ export function createTransport(
         });
       };
 
-      let current = openSub(nowSeconds(), true);
+      let current: { close: () => void } | null = null;
+      let closed = false;
+
+      // `since` is stamped BEFORE the AUTH wait so an event that arrives while
+      // we are authenticating is still delivered as a stored event.
+      const startedAt = nowSeconds();
+      void ensureAuthed().then(() => {
+        if (closed) return;
+        current = openSub(startedAt, true);
+      });
+
       const timer = setInterval(() => {
-        const next = openSub(nowSeconds() - OVERLAP_SECONDS, false);
-        current.close();
-        current = next;
+        void ensureAuthed().then(() => {
+          if (closed) return;
+          const next = openSub(nowSeconds() - OVERLAP_SECONDS, false);
+          current?.close();
+          current = next;
+        });
       }, RESUB_INTERVAL_MS);
       timer.unref?.();
 
       return {
         close: () => {
+          closed = true;
           clearInterval(timer);
-          current.close();
+          current?.close();
         },
       };
     },
@@ -158,16 +242,25 @@ export function createTransport(
       );
       // Track for active NIP-09 deletion once the advisory expiry lapses.
       deletions.add(event.id, expiresAt);
+      // Same ordering rule as the subscription: a write on these relays is
+      // AUTH-gated too, and `publish` neither waits for AUTH nor retries after
+      // an `auth-required` OK:false.
+      await ensureAuthed();
       const results = await Promise.allSettled(pool.publish(relays, event, { onauth }));
       const accepted = results.filter((r) => r.status === 'fulfilled').length;
+      const rejections = collectRejections(results, relays);
       logger.debug('Published reply', {
         intent,
         to: target.recipientPubkey.slice(0, 12),
         accepted,
         attempted: relays.length,
+        ...(rejections.length > 0 ? { rejections } : {}),
       });
       if (accepted === 0) {
-        logger.warn('Reply accepted by no relay', { intent });
+        // Carry the per-relay reason: a bounced reply is otherwise a silent
+        // dead-end for the customer, with no clue whether a relay guard
+        // (kind/size/expiry/AUTH/write policy) or a dead socket dropped it.
+        logger.warn('Reply accepted by no relay', { intent, rejections });
       }
     },
 
