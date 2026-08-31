@@ -4,7 +4,7 @@ Nostr middleman broker for **ReGBY** — BLIK-style coded payment requests for t
 zenten-pay wallet. A merchant encrypts a `defipay://` request to this server's
 npub; the server mints a short **8-digit code** and returns it. A customer
 redeems the code; the server returns the original URI. Every hop is a
-**NIP-44 v2 encrypted** Nostr **DM (kind 4)**.
+**NIP-04 encrypted** Nostr **DM (kind 4)**.
 
 This server holds **no funds and no wallet keys** — only its own Nostr identity
 key, used to decrypt requests and sign replies.
@@ -13,9 +13,15 @@ See [`src/flow-examples.md`](src/flow-examples.md) for full event examples.
 
 ## Protocol
 
-Encrypted **DM (kind 4)**. `content` is the **raw value** (NIP-44 ciphertext on
+Encrypted **DM (kind 4)**. `content` is the **raw value** (NIP-04 ciphertext on
 the wire): the `defipay://` URI (possibly multi-line / multi-option) or the bare
 eight-digit code — no JSON wrapper.
+
+NIP-04 is the required scheme on this kind, in both directions. It is
+deprecated and unauthenticated, and it is what every client reading these
+relays opens a kind 4 with — a NIP-44 payload here is not a message the other
+side reports as broken, it is one it never sees. Sender authenticity therefore
+comes from the event signature alone, never from a successful decrypt.
 
 - **Intent** rides the `['i', <intent>]` tag (single-letter → relay-indexable):
   `request_code` / `code` / `request_uri` / `uri`.
@@ -130,7 +136,7 @@ assert that match itself.
 | ------------------- | ------------------------------------------------- |
 | `src/protocol.ts`   | intent/tag + raw-content validation (mirrors app) |
 | `src/config.ts`     | env loading, key decode, pubkey derivation        |
-| `src/nostr.ts`      | relay pool, NIP-44 encrypt/decrypt, publish       |
+| `src/nostr.ts`      | relay pool, NIP-04 encrypt/decrypt, publish       |
 | `src/store.ts`      | SQLite code → URI store (5-min validity, 1-h retention, multi-use) + per-UTC-day file rotation |
 | `src/rate-limit.ts` | per-pubkey sliding window                         |
 | `src/blacklist.ts`  | 24h block list for malicious senders              |

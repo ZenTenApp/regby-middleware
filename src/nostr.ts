@@ -1,15 +1,25 @@
 /**
- * Nostr transport: relay pool, NIP-44 encrypt/decrypt, and regby event
+ * Nostr transport: relay pool, NIP-04 encrypt/decrypt, and regby event
  * build/publish. The middleman secret key never leaves this module's closure.
+ *
+ * NIP-04, not NIP-44, and deliberately: regby rides kind 4, and every client on
+ * the other side of these relays opens a kind 4 with `nip04.decrypt` and
+ * nothing else. One scheme per kind, in both directions — a reply this
+ * middleman can encrypt is one the app can read.
+ *
+ * NIP-04 is unauthenticated (AES-256-CBC, no MAC), so unlike NIP-44 a
+ * successful decrypt is NOT evidence of who wrote the ciphertext. Authorship
+ * rests entirely on the event signature, which the pool verifies, plus the
+ * `p`-tag filter. Nothing here may treat "it decrypted" as "the sender is who
+ * they claim".
  */
 import { SimplePool, useWebSocketImplementation } from 'nostr-tools/pool';
 import { type EventTemplate, finalizeEvent, type VerifiedEvent } from 'nostr-tools/pure';
-import { nip44 } from 'nostr-tools';
+import { nip04 } from 'nostr-tools';
 import type { Event, Filter } from 'nostr-tools';
 import WebSocket from 'ws';
 import { REGBY_KIND, INTENT_TAG, INBOUND_INTENTS, type OutboundIntent } from './protocol.ts';
 import { DeletionQueue } from './deletion-queue.ts';
-import { BoundedMap } from './bounded-map.ts';
 import { nowSeconds } from './time.ts';
 import { logger } from './logger.ts';
 
@@ -129,19 +139,11 @@ export function createTransport(
     if (failures.length > 0) logger.warn('Relay AUTH failed', { failures });
   };
 
-  // Per-peer NIP-44 conversation key — symmetric, so the same key decrypts the
-  // inbound event and encrypts the reply. Deriving it is an ECDH op, so cache
-  // per peer; the BoundedMap caps the cache so a flood of distinct senders can't
-  // grow it without limit.
-  const KEY_CACHE_MAX = 10_000;
-  const keyCache = new BoundedMap<string, Uint8Array>(KEY_CACHE_MAX);
-  const conversationKey = (peerPubkey: string): Uint8Array => {
-    const cached = keyCache.get(peerPubkey);
-    if (cached) return cached;
-    const key = nip44.getConversationKey(secretKey, peerPubkey);
-    keyCache.set(peerPubkey, key);
-    return key;
-  };
+  // No conversation-key cache under NIP-04: `nip04.encrypt`/`decrypt` take the
+  // secret key and the peer pubkey and do the ECDH internally, with no API for
+  // a precomputed key. That is one ECDH per message rather than one per peer —
+  // paid deliberately rather than worked around, since the alternative is
+  // assembling the cipher here by hand.
 
   // Publish NIP-09 kind-5 deletions for `ids`, chunked one event per batch.
   const deleteEventIds = async (ids: string[]): Promise<void> => {
@@ -224,14 +226,18 @@ export function createTransport(
     },
 
     decrypt(senderPubkey, content) {
-      return nip44.decrypt(content, conversationKey(senderPubkey));
+      // Keyed by the event's author, which the pool has already verified the
+      // signature of. A decrypt that succeeds says the ciphertext was written
+      // by someone holding the ECDH secret; it is the signature, not this, that
+      // says who — see this module's note.
+      return nip04.decrypt(secretKey, senderPubkey, content);
     },
 
     async reply(target, intent, content) {
       // Raw outbound content before encryption (a code/URI value or an error
       // reason — same intent either way). Debug only.
       logger.debug('Outbound plaintext', { intent, to: target.recipientPubkey.slice(0, 12), content });
-      const ciphertext = nip44.encrypt(content, conversationKey(target.recipientPubkey));
+      const ciphertext = nip04.encrypt(secretKey, target.recipientPubkey, content);
       const now = nowSeconds();
       const expiresAt = now + eventExpirySeconds;
       const event = finalizeEvent(

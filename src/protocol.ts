@@ -5,7 +5,7 @@
  *
  * Transport is a standard encrypted **DM (kind 4)** so events are treated as
  * messages. Design:
- *   - `content` is the **raw value**, NIP-44 encrypted: the `defipay://`
+ *   - `content` is the **raw value**, NIP-04 encrypted: the `defipay://`
  *     payment-request URI (possibly multi-line / multi-option) or the bare
  *     eight-digit code. No JSON wrapper.
  *   - the message **intent** rides a plaintext `['i', <intent>]` tag —
@@ -26,7 +26,8 @@
  * Only the URI/code lives in the ciphertext.
  */
 
-/** Encrypted DM kind (NIP-04 envelope, NIP-44 ciphertext content). */
+/** Encrypted DM kind: NIP-04 envelope and NIP-04 ciphertext, which is what
+ *  every client reading these relays expects under this kind. */
 export const REGBY_KIND = 4;
 
 /** Scheme every line of a payment-request URI must use. */
