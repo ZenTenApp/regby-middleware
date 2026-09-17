@@ -39,25 +39,27 @@ comes from the event signature alone, never from a successful decrypt.
 
 | direction          | `i` tag        | `content` (decrypted)        |
 | ------------------ | -------------- | ---------------------------- |
-| merchant → server  | `request_code` | `defito://…` URI             |
-| server → merchant  | `code`         | `42891337` *or* reason       |
-| customer → server  | `request_uri`  | `42891337`                   |
-| server → customer  | `uri`          | `defito://…` URI *or* reason |
+| merchant → server  | `request_code` | `defito://…` *or* `defifrom://…` URI |
+| server → merchant  | `code`         | `42891337` *or* reason               |
+| customer → server  | `request_uri`  | `42891337`                           |
+| server → customer  | `uri`          | the stored URI *or* reason           |
 
 ## Behaviour
 
 - **request_code** → validate every line uses the same one of our schemes
   (`defito://` for a request, `defifrom://` for a confirmation — a payload
-  mixing the two is refused), mint a unique 8-digit code, store `code → { uri, expiresAt, retainUntil }`, reply `i:code` with the
-  requester's event id in `e`. **Code validity (5 min) is anchored to the request
+  mixing the two is refused), mint a unique 8-digit code, store
+  `code → { uri, expiresAt, retainUntil }`, reply `i:code` with the requester's
+  event id in `e`. **Code validity (5 min) is anchored to the request
   event's `created_at`**, not server receive-time, so the merchant POS and the
   server count down from the same origin — the merchant already knows that
   timestamp (it signed the event), so no echo is needed. `created_at` is
   skew-clamped (`REGBY_CLOCK_SKEW_SECONDS`) to stop a forged future/stale stamp
   from gaming expiry.
 - A `request_code` whose decrypted payload is **not** one of those schemes is
-  treated as a deliberate bad request: the server replies `i:code` with `Invalid Request`
-  (not a code) and **blacklists the sender for 24 h** (`REGBY_BLACKLIST_SECONDS`).
+  treated as a deliberate bad request: the server replies `i:code` with
+  `Invalid Request` (not a code) and **blacklists the sender for 24 h**
+  (`REGBY_BLACKLIST_SECONDS`).
   Undecryptable noise and malformed codes are still dropped silently.
 - **request_uri** → look up the code. Valid → reply `i:uri` with the URI.
   **Multi-use**: the code is *not* consumed — any number of customers can redeem

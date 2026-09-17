@@ -1,7 +1,6 @@
 /**
  * Per-pubkey temporary blacklist. A sender that submits a `request_code` whose
- * decrypted payload is not a valid `defito://` / `defifrom://` URI is
- * deliberately abusing the
+ * decrypted payload uses none of our URI schemes is deliberately abusing the
  * service (they hold the conversation key — this is not random noise), so we
  * block them for a fixed window. Memory is bounded: entries are pruned on
  * access and by the periodic sweep.

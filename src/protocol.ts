@@ -32,15 +32,23 @@
 export const REGBY_KIND = 4;
 
 /**
- * The schemes a payload may use. A code stands in for either half of the
- * protocol: a `defito://` request the customer redeems, or a `defifrom://`
- * confirmation handed back once they have paid. Mirrors `REGBY_URI_PREFIXES`
- * in the app's `utils/regby.ts` — keep the two in lockstep or a payload the
- * wallet builds will be rejected here as malicious.
+ * The schemes a payload may use: a `defito://` payment request, which the
+ * customer redeems, or a `defifrom://` payment confirmation, which the merchant
+ * redeems. Mirrors `REGBY_URI_PREFIXES` in the app's `utils/regby.ts` — keep
+ * the two in lockstep or a payload the wallet builds is rejected here as
+ * malicious and its sender blacklisted for 24 h. `protocol.test.ts` pins the
+ * contents so an edit on this side at least fails loudly.
  */
-export const DEFITO_PREFIX = 'defito://';
-export const DEFIFROM_PREFIX = 'defifrom://';
-export const REGBY_URI_PREFIXES = [DEFITO_PREFIX, DEFIFROM_PREFIX] as const;
+export const REGBY_URI_PREFIXES = ['defito://', 'defifrom://'] as const;
+
+/**
+ * Line terminators we split a multi-line payload on. Deliberately WIDER than
+ * the `\r?\n` a wallet writes: "every line shares one scheme" is only a real
+ * guarantee if nothing else can start a line. A lone `\r` used to slip a
+ * second, differently-schemed line past the check inside what this file counted
+ * as one line, which is exactly the payload the rule exists to refuse.
+ */
+const LINE_BREAK_RE = /\r\n|[\n\r\u2028\u2029]/;
 
 /** Codes are exactly eight decimal digits. */
 export const REGBY_CODE_RE = /^\d{8}$/;
@@ -77,11 +85,10 @@ export type InboundMessage =
  * Outcome of parsing decrypted inbound content.
  *  - `ok`        → a well-formed message to dispatch.
  *  - `malicious` → decrypt succeeded (a real, targeted message) but a
- *    `request_code` carried a payload that is not one of our URIs. The sender
- *    proved they
- *    hold the conversation key, so this is a deliberate bad request → caller
- *    replies on the reused success intent (`code`, content = reason) and
- *    blacklists the sender.
+ *    `request_code` carried a payload that uses none of `REGBY_URI_PREFIXES`.
+ *    The sender proved they hold the conversation key, so this is a deliberate
+ *    bad request → caller replies on the reused success intent (`code`,
+ *    content = reason) and blacklists the sender.
  *  - `silent`    → junk we drop without a reply (empty/oversized, malformed
  *    code shape, or an outbound intent echoed back at us).
  */
@@ -106,12 +113,15 @@ export function extractIntent(tags: string[][]): InboundIntent | null {
 
 /**
  * Validate decrypted `content` for an inbound intent. A `request_code` whose
- * payload is not a valid DeFi payment URI is `malicious` (see ParseResult) so
- * the caller can blacklist the sender; a malformed code shape is dropped
- * `silent`.
+ * payload does not use one of `REGBY_URI_PREFIXES` is `malicious` (see
+ * ParseResult) so the caller can blacklist the sender; a malformed code shape
+ * is dropped `silent`.
  */
 export function parseInbound(intent: InboundIntent, content: string): ParseResult {
-  if (content.length === 0 || content.length > MAX_CONTENT_LENGTH) {
+  // Emptiness is tested on the TRIMMED content: `malicious` costs the sender a
+  // 24 h blacklist, and three spaces from a buggy client is noise, not proof of
+  // deliberate abuse. Only a payload with something in it can earn that.
+  if (content.trim().length === 0 || content.length > MAX_CONTENT_LENGTH) {
     return { ok: false, reason: 'silent' };
   }
 
@@ -127,9 +137,9 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
 }
 
 /**
- * A payment payload is one or more newline-separated lines, every non-empty one
- * using the SAME one of our schemes. Mirrors `isDefiUriContent` in the app's
- * `utils/regby.ts`, which the wallet applies to whatever we hand back.
+ * A payment payload is one or more line-separated lines, every non-empty one
+ * using the SAME one of `REGBY_URI_PREFIXES`. Mirrors `isDefiUriContent` in the
+ * app's `utils/regby.ts`, which the wallet applies to whatever we hand back.
  *
  * The lines must AGREE on their scheme. A request and a confirmation mean
  * opposite things, so a payload mixing them is either a bug or an attempt to
@@ -138,16 +148,28 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
  *
  * We deliberately do not validate anything past the scheme: networks, coins,
  * amounts and the required `nostr=<npub>` are the wallet's business, and this
- * server holds the plaintext it never needed to understand.
+ * server holds plaintext it never needed to understand. A line that is ONLY the
+ * scheme is still refused, because minting it burns a code and a round trip on
+ * something the wallet is certain to reject at redeem, leaving the merchant a
+ * failure they cannot explain.
+ *
+ * Note what this normalises is not what `parseInbound` stores: validation trims
+ * and lowercases each line, storage keeps `content` verbatim. That is on
+ * purpose. Case is meaningful (base58 and EVM checksum addresses), and a URI
+ * the merchant may one day SIGN must survive us byte for byte, so we must not
+ * rewrite a payload we only ever needed to screen. The wallet re-trims on
+ * receipt.
  */
 export function isValidPaymentUri(content: string): boolean {
   const lines = content
-    .split(/\r?\n/)
+    .split(LINE_BREAK_RE)
     .map((l) => l.trim().toLowerCase())
     .filter(Boolean);
-  const [first] = lines;
-  if (first === undefined) return false;
-  const prefix = REGBY_URI_PREFIXES.find((p) => first.startsWith(p));
-  if (prefix === undefined) return false;
-  return lines.every((l) => l.startsWith(prefix));
+  if (lines.length === 0) return false;
+  // "Some ONE prefix that every line uses" is the rule stated directly. Picking
+  // a prefix off the first line and testing the rest against it is the same
+  // answer only while no prefix is a prefix of another; this does not care.
+  return REGBY_URI_PREFIXES.some((p) =>
+    lines.every((l) => l.startsWith(p) && l.length > p.length),
+  );
 }
