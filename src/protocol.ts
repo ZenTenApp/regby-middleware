@@ -5,9 +5,10 @@
  *
  * Transport is a standard encrypted **DM (kind 4)** so events are treated as
  * messages. Design:
- *   - `content` is the **raw value**, NIP-04 encrypted: the `defipay://`
- *     payment-request URI (possibly multi-line / multi-option) or the bare
- *     eight-digit code. No JSON wrapper.
+ *   - `content` is the **raw value**, NIP-04 encrypted: a `defito://`
+ *     payment-request URI (possibly multi-line / multi-option), a
+ *     `defifrom://` payment confirmation, or the bare eight-digit code. No
+ *     JSON wrapper.
  *   - the message **intent** rides a plaintext `['i', <intent>]` tag —
  *     single-letter `i` is relay-indexable, so the server subscribes
  *     `#i:['request_code','request_uri']` and pulls only inbound regby traffic.
@@ -17,9 +18,9 @@
  *   - there is **no `error` intent**. A failure reply reuses the success intent
  *     (`code` for a `request_code`, `uri` for a `request_uri`) and carries the
  *     reason string in `content` instead of a value. The client tells a value
- *     from an error by the content's SHAPE (8 digits / `defipay://` prefix) and
- *     whitelist-sanitises anything else — the middleman is untrusted, so a free
- *     `error` text channel was just a hole for arbitrary text into the UI.
+ *     from an error by the content's SHAPE (8 digits / one of our URI schemes)
+ *     and whitelist-sanitises anything else — the middleman is untrusted, so a
+ *     free `error` text channel was just a hole for arbitrary text into the UI.
  *   - relay retention is bounded by NIP-40 `['expiration', unixSec]`.
  *
  * Tags are covered by the event signature, so intent/linkage are authenticated.
@@ -30,8 +31,16 @@
  *  every client reading these relays expects under this kind. */
 export const REGBY_KIND = 4;
 
-/** Scheme every line of a payment-request URI must use. */
-export const DEFIPAY_PREFIX = 'defipay://';
+/**
+ * The schemes a payload may use. A code stands in for either half of the
+ * protocol: a `defito://` request the customer redeems, or a `defifrom://`
+ * confirmation handed back once they have paid. Mirrors `REGBY_URI_PREFIXES`
+ * in the app's `utils/regby.ts` — keep the two in lockstep or a payload the
+ * wallet builds will be rejected here as malicious.
+ */
+export const DEFITO_PREFIX = 'defito://';
+export const DEFIFROM_PREFIX = 'defifrom://';
+export const REGBY_URI_PREFIXES = [DEFITO_PREFIX, DEFIFROM_PREFIX] as const;
 
 /** Codes are exactly eight decimal digits. */
 export const REGBY_CODE_RE = /^\d{8}$/;
@@ -68,7 +77,8 @@ export type InboundMessage =
  * Outcome of parsing decrypted inbound content.
  *  - `ok`        → a well-formed message to dispatch.
  *  - `malicious` → decrypt succeeded (a real, targeted message) but a
- *    `request_code` carried a non-`defipay://` payload. The sender proved they
+ *    `request_code` carried a payload that is not one of our URIs. The sender
+ *    proved they
  *    hold the conversation key, so this is a deliberate bad request → caller
  *    replies on the reused success intent (`code`, content = reason) and
  *    blacklists the sender.
@@ -96,8 +106,9 @@ export function extractIntent(tags: string[][]): InboundIntent | null {
 
 /**
  * Validate decrypted `content` for an inbound intent. A `request_code` whose
- * payload is not `defipay://` is `malicious` (see ParseResult) so the caller can
- * blacklist the sender; a malformed code shape is dropped `silent`.
+ * payload is not a valid DeFi payment URI is `malicious` (see ParseResult) so
+ * the caller can blacklist the sender; a malformed code shape is dropped
+ * `silent`.
  */
 export function parseInbound(intent: InboundIntent, content: string): ParseResult {
   if (content.length === 0 || content.length > MAX_CONTENT_LENGTH) {
@@ -105,7 +116,7 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
   }
 
   if (intent === 'request_code') {
-    if (!isValidDefipay(content)) return { ok: false, reason: 'malicious' };
+    if (!isValidPaymentUri(content)) return { ok: false, reason: 'malicious' };
     return { ok: true, message: { intent, uri: content } };
   }
 
@@ -116,14 +127,27 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
 }
 
 /**
- * A DirectPay payload is one or more newline-separated `defipay://` lines; every
- * non-empty line must use the scheme. Mirrors the app's multi-option request.
+ * A payment payload is one or more newline-separated lines, every non-empty one
+ * using the SAME one of our schemes. Mirrors `isDefiUriContent` in the app's
+ * `utils/regby.ts`, which the wallet applies to whatever we hand back.
+ *
+ * The lines must AGREE on their scheme. A request and a confirmation mean
+ * opposite things, so a payload mixing them is either a bug or an attempt to
+ * have us mint one code that redeems as both — we refuse to store it at all
+ * rather than leave the wallet as the only thing standing between the two.
+ *
+ * We deliberately do not validate anything past the scheme: networks, coins,
+ * amounts and the required `nostr=<npub>` are the wallet's business, and this
+ * server holds the plaintext it never needed to understand.
  */
-export function isValidDefipay(content: string): boolean {
+export function isValidPaymentUri(content: string): boolean {
   const lines = content
     .split(/\r?\n/)
-    .map((l) => l.trim())
+    .map((l) => l.trim().toLowerCase())
     .filter(Boolean);
-  if (lines.length === 0) return false;
-  return lines.every((l) => l.toLowerCase().startsWith(DEFIPAY_PREFIX));
+  const [first] = lines;
+  if (first === undefined) return false;
+  const prefix = REGBY_URI_PREFIXES.find((p) => first.startsWith(p));
+  if (prefix === undefined) return false;
+  return lines.every((l) => l.startsWith(prefix));
 }

@@ -7,11 +7,13 @@ CUSTOMER pubkey = c0c0...c0c0
 ```
 
 Transport is an encrypted **DM (kind 4)**. `content` is the **raw value**
-(NIP-44 encrypted on the wire, shown decrypted below): a `defipay://` URI
-(possibly multi-line / multi-option) or a bare eight-digit code — no JSON wrapper.
+(NIP-04 encrypted on the wire, shown decrypted below): a `defito://` payment
+request (possibly multi-line / multi-option), a `defifrom://` payment
+confirmation, or a bare eight-digit code — no JSON wrapper.
 
 - Intent rides the `["i", <intent>]` tag: `request_code` / `code` /
-  `request_uri` / `uri` / `error`.
+  `request_uri` / `uri`. There is **no `error` intent** — a failure reuses the
+  request's success intent and carries the reason in `content`.
 - Replies link to the request via `["e", <request-event-id>]` (the client
   matches a reply to the request it published — no in-band id).
 - `["expiration", <unix>]` (NIP-40) = `created_at + 1 h` on every event — a
@@ -25,8 +27,8 @@ Transport is an encrypted **DM (kind 4)**. `content` is the **raw value**
 
 Decrypted `content` (the merchant's multi-option request):
 ```
-defipay://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00
-defipay://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18
+defito://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&tx=1781866033
+defito://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&tx=1781866033
 ```
 Event on relay:
 ```json
@@ -44,7 +46,7 @@ Event on relay:
   "sig": "…"
 }
 ```
-Server: read `i:request_code` → decrypt → validate every line is `defipay://` → `store.mint(uri, clampToSkew(created_at))` → 8-digit code (SQLite row), valid 5 min from the merchant's `created_at`, retained 1 h. A non-`defipay://` payload here → `i:code` with `Invalid Request` (a reason, not a code) + 24h blacklist (see error variant).
+Server: read `i:request_code` → decrypt → validate every line uses the SAME one of our schemes (`defito://` here; `defifrom://` for a confirmation, and a payload mixing the two is refused) → `store.mint(uri, clampToSkew(created_at))` → 8-digit code (SQLite row), valid 5 min from the merchant's `created_at`, retained 1 h. Anything else → `i:code` with `Invalid Request` (a reason, not a code) + 24h blacklist (see error variant). The server validates the SCHEME only: networks, coins, amounts and the required `nostr=<npub>` are the wallet's business, and it holds plaintext it never needed to understand.
 
 ## Hop 2 — middleman → merchant (`i: code`)
 
@@ -99,8 +101,8 @@ Server: `store.redeem("42891337")` → found + unexpired → returns URI. **Not 
 
 Decrypted `content` (same multi-option URI the merchant sent):
 ```
-defipay://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00
-defipay://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18
+defito://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&tx=1781866033
+defito://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&tx=1781866033
 ```
 Event:
 ```json
@@ -125,7 +127,7 @@ Customer matches by `["e", <its request id>]`, decrypts → URI → `ingestPayme
 There is **no `error` intent**. A failure reply carries the request's success
 intent (`code` for a `request_code`, `uri` for a `request_uri`) but its `content`
 is a reason string instead of a value. The client tells them apart by shape — an
-8-digit code / a `defipay://` payload is a value; anything else is an error
+8-digit code / one of our URI schemes is a value; anything else is an error
 reason, whitelist-sanitised before display.
 
 Decrypted `content`:
@@ -139,7 +141,7 @@ failure) or `["i","code"]` (mint failure), `["expiration", …]`.
 - `"Code Not Found"` — never minted, or past its 1-h retention (purged). Reply `i:uri`.
 - `"Service Busy, Try Again"` — mint-time store overflow. Reply `i:code`.
 - `"Invalid Request"` — a `request_code` whose decrypted payload was not
-  `defipay://`. Reply `i:code`. The sender is also **blacklisted for 24 h**;
+  one of our schemes. Reply `i:code`. The sender is also **blacklisted for 24 h**;
   further events from them are dropped silently until the block lapses.
 
 ## Notes

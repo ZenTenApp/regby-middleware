@@ -126,7 +126,7 @@ export class ReGBYBroker {
     const parsed = parseInbound(intent, plaintext);
     if (!parsed.ok) {
       if (parsed.reason === 'malicious') {
-        // Decrypt succeeded but request_code carried a non-defipay payload —
+        // Decrypt succeeded but request_code carried a non-payment payload —
         // a deliberate bad request. Block the sender and tell them once.
         this.blacklist.block(event.pubkey);
         logger.warn('Blacklisted sender — malicious request_code', {
