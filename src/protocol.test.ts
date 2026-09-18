@@ -234,6 +234,12 @@ const PARITY_REFUSED: readonly string[] = [
   `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}\u2028https://evil.test`,
   `defito://base/0xabc&amount=&amount=USDT:5&orderid=${ORDER}&nostr=${NPUB}`,
   `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=&nostr=${NPUB}`,
+  // A hostile value in a presence-checked field. The app drops it, so without
+  // the same screen here a code mints and is refused at redeem.
+  `defito://base/0xabc&amount=USDT:1&orderid=%3Cscript%3E&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&orderid=%E2%80%AE${ORDER}&nostr=${NPUB}`,
+  // Space-separated foreign scheme - the app refuses it, so this must too.
+  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB} https://evil.test`,
 ];
 
 test('parity: every payload the app parses, this server mints', () => {

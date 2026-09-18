@@ -249,13 +249,33 @@ function param(tail: string, name: string): string | undefined {
     if (token.slice(0, eq).trim().toLowerCase() !== name) continue;
     const raw = token.slice(eq + 1).trim();
     if (!raw) return undefined;
+    let value: string;
     try {
-      return decodeURIComponent(raw);
+      value = decodeURIComponent(raw);
     } catch {
-      return raw; // malformed escape - judge it on what it plainly says
+      value = raw; // malformed escape - judge it on what it plainly says
     }
+    // The app DROPS a value carrying hidden/bidi characters or an injection
+    // marker, so a payload with one in `orderid` would mint a code here and be
+    // refused at redeem - the exact mismatch `hasRequiredFields` exists to
+    // prevent. `nostr` is covered anyway (bech32 will not decode one); the
+    // presence-checked fields are not, so without this they slip through.
+    return isHostileValue(value) ? undefined : value;
   }
   return undefined;
+}
+
+// Control (C0/C1), zero-width and bidi-override code points, plus the markup
+// and foreign-scheme markers. Mirrors `utils/hostile-text.ts` in the app; the
+// two must agree, or one side mints a code the other refuses at redeem.
+const HIDDEN_CHARS_RE =
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/;
+const INJECTION_MARKERS: readonly string[] = ['javascript:', 'vbscript:', '<', '>', '\\'];
+
+function isHostileValue(value: string): boolean {
+  if (HIDDEN_CHARS_RE.test(value)) return true;
+  const lower = value.toLowerCase();
+  return INJECTION_MARKERS.some((marker) => lower.includes(marker));
 }
 
 /**
