@@ -27,6 +27,8 @@
  * Only the URI/code lives in the ciphertext.
  */
 
+import { decode } from 'nostr-tools/nip19';
+
 /** Encrypted DM kind: NIP-04 envelope and NIP-04 ciphertext, which is what
  *  every client reading these relays expects under this kind. */
 export const REGBY_KIND = 4;
@@ -82,19 +84,24 @@ export type InboundMessage =
   | { intent: 'request_uri'; code: string };
 
 /**
- * Outcome of parsing decrypted inbound content.
+ * Outcome of parsing decrypted inbound content. The three verdicts differ by
+ * what they cost the SENDER, so what separates them is evidence of intent.
  *  - `ok`        → a well-formed message to dispatch.
  *  - `malicious` → decrypt succeeded (a real, targeted message) but a
  *    `request_code` carried a payload that uses none of `REGBY_URI_PREFIXES`.
- *    The sender proved they hold the conversation key, so this is a deliberate
- *    bad request → caller replies on the reused success intent (`code`,
- *    content = reason) and blacklists the sender.
+ *    The sender proved they hold the conversation key, so aiming a foreign
+ *    scheme at us is deliberate → caller replies on the reused success intent
+ *    (`code`, content = reason) AND blacklists the sender for 24 h.
+ *  - `malformed` → one of ours by scheme, but missing a field the grammar
+ *    always requires. Caller replies with the same reason and does NOT
+ *    blacklist: this is a broken client, not an attacker, and a 24 h lockout
+ *    is the wrong answer to a merchant whose POS built a bad string.
  *  - `silent`    → junk we drop without a reply (empty/oversized, malformed
  *    code shape, or an outbound intent echoed back at us).
  */
 export type ParseResult =
   | { ok: true; message: InboundMessage }
-  | { ok: false; reason: 'malicious' | 'silent' };
+  | { ok: false; reason: 'malicious' | 'malformed' | 'silent' };
 
 /**
  * Read the inbound intent from an event's tags. Returns the first recognised
@@ -114,8 +121,9 @@ export function extractIntent(tags: string[][]): InboundIntent | null {
 /**
  * Validate decrypted `content` for an inbound intent. A `request_code` whose
  * payload does not use one of `REGBY_URI_PREFIXES` is `malicious` (see
- * ParseResult) so the caller can blacklist the sender; a malformed code shape
- * is dropped `silent`.
+ * ParseResult) so the caller can blacklist the sender; one that uses a right
+ * scheme but omits a required field is `malformed` and is NOT blacklisted; a
+ * malformed code shape is dropped `silent`.
  */
 export function parseInbound(intent: InboundIntent, content: string): ParseResult {
   // Emptiness is tested on the TRIMMED content: `malicious` costs the sender a
@@ -126,7 +134,10 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
   }
 
   if (intent === 'request_code') {
+    // Two questions, two punishments: "is this even ours" (a foreign scheme is
+    // deliberate) then "is it complete" (a missing field is a broken client).
     if (!isValidPaymentUri(content)) return { ok: false, reason: 'malicious' };
+    if (!hasRequiredFields(content)) return { ok: false, reason: 'malformed' };
     return { ok: true, message: { intent, uri: content } };
   }
 
@@ -172,4 +183,85 @@ export function isValidPaymentUri(content: string): boolean {
   return REGBY_URI_PREFIXES.some((p) =>
     lines.every((l) => l.startsWith(p) && l.length > p.length),
   );
+}
+
+/**
+ * Every line carries the fields the grammar ALWAYS requires. Checked separately
+ * from the scheme because it earns a softer verdict (see ParseResult).
+ *
+ * This is the one validation beyond the scheme that is safe to run here,
+ * because none of it can drift: the shape is fixed by the grammar, and `nostr`
+ * is a bech32 key that decodes or does not. Chain names, coin symbols, address
+ * formats and amount VALUES are deliberately still not checked. They come from
+ * a stablecoin registry that updates without a server deploy, so a list frozen
+ * here would start refusing valid payloads the day a chain is added, and the
+ * refusal costs a merchant a reply they cannot act on. The wallet re-validates
+ * all of it at redeem, where the registry actually lives, and must anyway:
+ * this server is untrusted, so nothing it approves is a safety guarantee.
+ *
+ * What we DO refuse is a payload the wallet is certain to reject, because
+ * minting one burns a code and hands the merchant a failure with no
+ * explanation attached.
+ */
+function hasRequiredFields(content: string): boolean {
+  return content
+    .split(LINE_BREAK_RE)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .every(lineHasRequiredFields);
+}
+
+function lineHasRequiredFields(line: string): boolean {
+  const rest = line.replace(/^[a-z]+:\/\//i, '');
+  // The canonical separator is `&`; `?` on the first param is also accepted.
+  const qIdx = rest.search(/[?&]/);
+  if (qIdx === -1) return false; // no params at all
+  const path = rest.slice(0, qIdx);
+
+  // `<networks>/<recipients>` — both halves must be non-empty.
+  const slash = path.indexOf('/');
+  if (slash <= 0) return false;
+  if (path.slice(slash + 1).trim().length === 0) return false;
+
+  const tail = rest.slice(qIdx + 1);
+  // A coin list is required; its `:<value>` half is optional on a request and
+  // required on a confirmation, but that is the wallet's rule to enforce - we
+  // only check the parameter is present and non-empty.
+  if (!param(tail, 'amount')) return false;
+  // `tx` is the on-chain hash on a confirmation, and a confirmation without one
+  // says nothing. On a request it is an optional correlation id.
+  if (/^defifrom:\/\//i.test(line) && !param(tail, 'tx')) return false;
+  return isIdentityKey(param(tail, 'nostr'));
+}
+
+/**
+ * First occurrence of `name` in an `a=b&c=d` tail, case-insensitive on the key
+ * and trimmed, or undefined. Matches the app's own parameter reader, including
+ * first-wins on a duplicate key.
+ */
+function param(tail: string, name: string): string | undefined {
+  for (const token of tail.split('&')) {
+    const eq = token.indexOf('=');
+    if (eq === -1) continue;
+    if (token.slice(0, eq).trim().toLowerCase() !== name) continue;
+    const value = token.slice(eq + 1).trim();
+    return value.length > 0 ? value : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * A bech32 Nostr identity key. `npub` and `nprofile` both carry one, and the
+ * app accepts either, so we must too or we would refuse payloads it builds.
+ * A NIP-05 string and a bare hex pubkey are NOT keys here, matching the app:
+ * the first names a recipient to look up, the second has a tx hash's shape.
+ */
+function isIdentityKey(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  try {
+    const { type } = decode(value);
+    return type === 'npub' || type === 'nprofile';
+  } catch {
+    return false; // bad checksum, truncated, or not bech32 at all
+  }
 }

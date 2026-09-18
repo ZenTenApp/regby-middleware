@@ -56,11 +56,21 @@ comes from the event signature alone, never from a successful decrypt.
   timestamp (it signed the event), so no echo is needed. `created_at` is
   skew-clamped (`REGBY_CLOCK_SKEW_SECONDS`) to stop a forged future/stale stamp
   from gaming expiry.
-- A `request_code` whose decrypted payload is **not** one of those schemes is
-  treated as a deliberate bad request: the server replies `i:code` with
-  `Invalid Request` (not a code) and **blacklists the sender for 24 h**
-  (`REGBY_BLACKLIST_SECONDS`).
+- Two ways a `request_code` is refused, and they differ by what they cost the
+  sender. A payload using **none** of those schemes is deliberate (the sender
+  proved they hold the conversation key), so the server replies `i:code` with
+  `Invalid Request` and **blacklists them for 24 h** (`REGBY_BLACKLIST_SECONDS`).
+  A payload on a right scheme that **omits a field the grammar always requires**
+  (`<networks>/<recipients>`, `amount=`, a decodable `nostr=<npub>`, plus `tx=`
+  on a confirmation) gets the same reply and **no blacklist** — that is a broken
+  client, and a day-long lockout would make a POS bug look like an outage.
   Undecryptable noise and malformed codes are still dropped silently.
+- Nothing past that is validated here, on purpose. Chain names, coin symbols,
+  address formats and amount values come from a stablecoin registry that updates
+  without a server deploy, so a list frozen here would start refusing valid
+  payloads the day a chain is added. The wallet re-validates all of it at
+  redeem, where the registry lives — and must anyway, since this server is
+  untrusted and nothing it approves is a safety guarantee.
 - **request_uri** → look up the code. Valid → reply `i:uri` with the URI.
   **Multi-use**: the code is *not* consumed — any number of customers can redeem
   it until it expires. Lapsed but still **retained** (within 1 h of its

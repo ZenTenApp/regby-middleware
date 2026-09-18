@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { nprofileEncode } from 'nostr-tools/nip19';
+
 import {
   extractIntent,
   parseInbound,
@@ -20,6 +22,12 @@ test('extractIntent rejects unknown / absent', () => {
   assert.equal(extractIntent([['p', 'x'], ['t', 'regby']]), null);
   assert.equal(extractIntent([]), null);
 });
+
+// A real npub, the hex it decodes to, and an nprofile for the same key. The
+// shape check decodes `nostr=`, so a placeholder will not do.
+const NPUB = 'npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef';
+const PUBKEY_HEX = 'ca89cb11f1c75d5b6622268ff43d2288ea8b2cb5b9aa996ff9ff704fc904b78b';
+const NPROFILE = nprofileEncode({ pubkey: PUBKEY_HEX });
 
 test('REGBY_URI_PREFIXES is exactly the pair the app mirrors', () => {
   // The lockstep with the app's `utils/regby.ts` is otherwise carried by prose
@@ -93,14 +101,14 @@ test('isValidPaymentUri rejects a foreign scheme or empty', () => {
 });
 
 test('parseInbound: request_code returns the raw uri', () => {
-  const uri = 'defito://base/0xabc&amount=USDT:1&nostr=npub1x';
+  const uri = `defito://base/0xabc&amount=USDT:1&nostr=${NPUB}`;
   assert.deepEqual(parseInbound('request_code', uri), {
     ok: true,
     message: { intent: 'request_code', uri },
   });
   // The stored value is the plaintext verbatim — we never normalise a payload
   // we hand back to a wallet that will parse it strictly.
-  const mixedCase = 'DeFiTo://base/0xAbC&amount=USDT:1';
+  const mixedCase = `DeFiTo://base/0xAbC&Amount=USDT:1&NOSTR=${NPUB}`;
   assert.deepEqual(parseInbound('request_code', mixedCase), {
     ok: true,
     message: { intent: 'request_code', uri: mixedCase },
@@ -111,6 +119,59 @@ test('parseInbound: request_code with a non-payment payload is malicious', () =>
   assert.deepEqual(parseInbound('request_code', 'https://evil.test'), {
     ok: false,
     reason: 'malicious',
+  });
+});
+
+test('parseInbound: a missing required field is malformed, NOT malicious', () => {
+  // The verdicts differ by what they cost the sender: `malicious` is a 24 h
+  // blacklist, `malformed` is a reply. A POS that builds a bad string is a
+  // broken client, and locking it out for a day makes a bug look like an
+  // outage. Only aiming a foreign scheme at us earns the block.
+  const malformed = (uri: string) =>
+    assert.deepEqual(parseInbound('request_code', uri), { ok: false, reason: 'malformed' }, uri);
+
+  malformed(`defito://base/0xabc&amount=USDT:1`); // no nostr
+  malformed(`defito://base/0xabc&nostr=${NPUB}`); // no amount
+  malformed(`defito://base&amount=USDT:1&nostr=${NPUB}`); // no recipient segment
+  malformed(`defito://base/&amount=USDT:1&nostr=${NPUB}`); // empty recipient
+  malformed(`defito:///0xabc&amount=USDT:1&nostr=${NPUB}`); // empty network
+  malformed(`defito://base/0xabc`); // no params at all
+  // A confirmation says nothing without the on-chain hash it is confirming.
+  malformed(`defifrom://base/0xabc&amount=USDT:1&nostr=${NPUB}`);
+  // Only ONE line has to be short for the payload to be refused.
+  malformed(`defito://base/0xabc&amount=USDT:1&nostr=${NPUB}\ndefito://tron/Tabc&amount=USDT:1`);
+});
+
+test('parseInbound: nostr must be a decodable identity key', () => {
+  const malformed = (npub: string) =>
+    assert.deepEqual(
+      parseInbound('request_code', `defito://base/0xabc&amount=USDT:1&nostr=${npub}`),
+      { ok: false, reason: 'malformed' },
+      npub,
+    );
+  malformed('npub1x'); // truncated
+  malformed(`${NPUB.slice(0, -1)}q`); // bad checksum
+  malformed('office@coffeeshop.com'); // a recipient to look up, not a key
+  malformed(PUBKEY_HEX); // bare hex has a tx hash's shape
+  // `nprofile` carries a key too and the app accepts it, so we must as well or
+  // we would refuse a payload the wallet built.
+  assert.deepEqual(
+    parseInbound('request_code', `defito://base/0xabc&amount=USDT:1&nostr=${NPROFILE}`),
+    {
+      ok: true,
+      message: {
+        intent: 'request_code',
+        uri: `defito://base/0xabc&amount=USDT:1&nostr=${NPROFILE}`,
+      },
+    },
+  );
+});
+
+test('parseInbound: a complete confirmation passes', () => {
+  const uri = `defifrom://base/0xabc&amount=USDT:1&tx=0xdead&nostr=${NPUB}`;
+  assert.deepEqual(parseInbound('request_code', uri), {
+    ok: true,
+    message: { intent: 'request_code', uri },
   });
 });
 
@@ -149,7 +210,7 @@ test('extractIntent rejects the outbound intents echoed back at us', () => {
 
 test('parseInbound: oversized content dropped silently', () => {
   // Silent regardless of intent (no blacklist on a size flood).
-  assert.deepEqual(parseInbound('request_code', 'defito://' + 'a'.repeat(5000)), {
+  assert.deepEqual(parseInbound('request_code', 'defito://a/b&amount=x&nostr=' + 'a'.repeat(5000)), {
     ok: false,
     reason: 'silent',
   });

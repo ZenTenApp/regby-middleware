@@ -46,7 +46,7 @@ Event on relay:
   "sig": "…"
 }
 ```
-Server: read `i:request_code` → decrypt → validate every line uses the SAME one of our schemes (`defito://` here; `defifrom://` for a confirmation, and a payload mixing the two is refused) → `store.mint(uri, clampToSkew(created_at))` → 8-digit code (SQLite row), valid 5 min from the merchant's `created_at`, retained 1 h. Anything else → `i:code` with `Invalid Request` (a reason, not a code) + 24h blacklist (see error variant). The server validates the SCHEME only: networks, coins, amounts and the required `nostr=<npub>` are the wallet's business, and it holds plaintext it never needed to understand.
+Server: read `i:request_code` → decrypt → validate every line uses the SAME one of our schemes (`defito://` here; `defifrom://` for a confirmation, and a payload mixing the two is refused) → `store.mint(uri, clampToSkew(created_at))` → 8-digit code (SQLite row), valid 5 min from the merchant's `created_at`, retained 1 h. Anything else → `i:code` with `Invalid Request` (a reason, not a code) + 24h blacklist (see error variant). A payload on a RIGHT scheme that omits a field the grammar always requires (`<networks>/<recipients>`, `amount=`, a decodable `nostr=<npub>`, plus `tx=` on a confirmation) gets the same reply WITHOUT the blacklist: a broken client is not an attacker. Past that the server validates nothing - networks, coins, address formats and amount values are the wallet's business, and it holds plaintext it never needed to understand.
 
 ## Hop 2 — middleman → merchant (`i: code`)
 

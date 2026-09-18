@@ -125,19 +125,29 @@ export class ReGBYBroker {
     const target: ReplyTarget = { recipientPubkey: event.pubkey, requestEventId: event.id };
     const parsed = parseInbound(intent, plaintext);
     if (!parsed.ok) {
+      if (parsed.reason === 'silent') {
+        logger.debug('Unusable content — dropping', { id: event.id.slice(0, 12), intent });
+        return;
+      }
+      // Both remaining verdicts answer the sender; only `malicious` punishes.
+      // A `malformed` payload used one of our schemes but omitted a required
+      // field, which is a broken client — telling them is the useful response,
+      // and a 24 h lockout would just make a POS bug look like an outage.
       if (parsed.reason === 'malicious') {
-        // Decrypt succeeded but request_code carried a non-payment payload —
-        // a deliberate bad request. Block the sender and tell them once.
+        // Aiming a foreign scheme at us after proving they hold the
+        // conversation key is deliberate. Block the sender and tell them once.
         this.blacklist.block(event.pubkey);
         logger.warn('Blacklisted sender — malicious request_code', {
           from: event.pubkey.slice(0, 12),
         });
-        // `malicious` only arises for request_code, so the failure reuses its
-        // success intent (`code`); the non-code content reads as an error.
-        await this.transport.reply(target, REPLY_INTENT.request_code, 'Invalid Request');
       } else {
-        logger.debug('Malformed content — dropping', { id: event.id.slice(0, 12), intent });
+        logger.info('Rejected malformed request_code', { from: event.pubkey.slice(0, 12) });
       }
+      // Neither verdict arises for request_uri, so the failure reuses
+      // request_code's success intent (`code`); the non-code content reads as
+      // an error. `Invalid Request` is one of the four reasons the app will
+      // surface verbatim — anything else renders as its generic fallback.
+      await this.transport.reply(target, REPLY_INTENT.request_code, 'Invalid Request');
       return;
     }
 
