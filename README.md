@@ -3,8 +3,12 @@
 Nostr middleman broker for **ReGBY** — BLIK-style coded payment requests for the
 zenten-pay wallet. A merchant encrypts a `defito://` request to this server's
 npub; the server mints a short **8-digit code** and returns it. A customer
-redeems the code; the server returns the original URI. A `defifrom://` payment
-confirmation rides the same round-trip. Every hop is a
+redeems the code; the server returns the original URI.
+
+A `defifrom://` payment **confirmation** never passes through here. It is sent
+straight to the npub named in the invoice it answers, so there is nothing for a
+middleman to do: this broker exists to squeeze an invoice into eight digits a
+customer can type, and nobody types a confirmation. Every hop is a
 **NIP-04 encrypted** Nostr **DM (kind 4)**.
 
 This server holds **no funds and no wallet keys** — only its own Nostr identity
@@ -15,8 +19,8 @@ See [`src/flow-examples.md`](src/flow-examples.md) for full event examples.
 ## Protocol
 
 Encrypted **DM (kind 4)**. `content` is the **raw value** (NIP-04 ciphertext on
-the wire): a `defito://` URI (possibly multi-line / multi-option), a
-`defifrom://` confirmation, or the bare eight-digit code — no JSON wrapper.
+the wire): a `defito://` URI (possibly multi-line / multi-option) or the bare
+eight-digit code — no JSON wrapper.
 
 NIP-04 is the required scheme on this kind, in both directions. It is
 deprecated and unauthenticated, and it is what every client reading these
@@ -29,7 +33,7 @@ comes from the event signature alone, never from a successful decrypt.
 - **No `error` intent**: a failure reuses the request's success intent (`code`
   for a `request_code`, `uri` for a `request_uri`) and carries the reason string
   in `content`. The client tells a value from an error by the content's **shape**
-  (8 digits / one of our URI schemes) and whitelist-sanitises anything else — the
+  (8 digits / a `defito://` prefix) and whitelist-sanitises anything else — the
   middleman is untrusted, so a free error-text channel was a hole into the UI.
 - **Correlation** is the `['e', <request-event-id>]` reply tag — the client
   matches a reply to the request it published. No in-band id.
@@ -39,16 +43,15 @@ comes from the event signature alone, never from a successful decrypt.
 
 | direction          | `i` tag        | `content` (decrypted)        |
 | ------------------ | -------------- | ---------------------------- |
-| merchant → server  | `request_code` | `defito://…` *or* `defifrom://…` URI |
-| server → merchant  | `code`         | `42891337` *or* reason               |
-| customer → server  | `request_uri`  | `42891337`                           |
-| server → customer  | `uri`          | the stored URI *or* reason           |
+| merchant → server  | `request_code` | `defito://…` URI             |
+| server → merchant  | `code`         | `42891337` *or* reason       |
+| customer → server  | `request_uri`  | `42891337`                   |
+| server → customer  | `uri`          | `defito://…` URI *or* reason |
 
 ## Behaviour
 
-- **request_code** → validate every line uses the same one of our schemes
-  (`defito://` for a request, `defifrom://` for a confirmation — a payload
-  mixing the two is refused), mint a unique 8-digit code, store
+- **request_code** → validate every line is a `defito://` invoice, mint a
+  unique 8-digit code, store
   `code → { uri, expiresAt, retainUntil }`, reply `i:code` with the requester's
   event id in `e`. **Code validity (5 min) is anchored to the request
   event's `created_at`**, not server receive-time, so the merchant POS and the
@@ -57,18 +60,19 @@ comes from the event signature alone, never from a successful decrypt.
   skew-clamped (`REGBY_CLOCK_SKEW_SECONDS`) to stop a forged future/stale stamp
   from gaming expiry.
 - Two ways a `request_code` is refused, and they differ by what they cost the
-  sender. A payload using **none** of those schemes is deliberate (the sender
-  proved they hold the conversation key), so the server replies `i:code` with
+  sender. A payload that is **not `defito://`** is deliberate (the sender proved
+  they hold the conversation key), so the server replies `i:code` with
   `Invalid Request` and **blacklists them for 24 h** (`REGBY_BLACKLIST_SECONDS`).
-  A payload on a right scheme that **omits a field the grammar always requires**
-  (`<networks>/<recipients>`, `amount=`, a decodable `nostr=<npub>`, plus `tx=`
-  on a confirmation) gets the same reply and **no blacklist** — that is a broken
-  client, and a day-long lockout would make a POS bug look like an outage.
-  Undecryptable noise and malformed codes are still dropped silently.
+  A `defito://` payload that **omits a field the grammar always requires**
+  (`<networks>/<recipients>`, `amount=`, `orderid=`, a decodable `nostr=<npub>`)
+  gets the same reply and **no blacklist** — that is a broken client, and a
+  day-long lockout would make a POS bug look like an outage. Undecryptable
+  noise and malformed codes are still dropped silently.
 - Nothing past that is validated here, on purpose. Chain names, coin symbols,
   address formats and amount values come from a stablecoin registry that updates
   without a server deploy, so a list frozen here would start refusing valid
-  payloads the day a chain is added. The wallet re-validates all of it at
+  payloads the day a chain is added. `orderid` is likewise opaque: we check it
+  is present, never what it contains. The wallet re-validates all of it at
   redeem, where the registry lives — and must anyway, since this server is
   untrusted and nothing it approves is a safety guarantee.
 - **request_uri** → look up the code. Valid → reply `i:uri` with the URI.

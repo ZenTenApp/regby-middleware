@@ -8,8 +8,9 @@ CUSTOMER pubkey = c0c0...c0c0
 
 Transport is an encrypted **DM (kind 4)**. `content` is the **raw value**
 (NIP-04 encrypted on the wire, shown decrypted below): a `defito://` payment
-request (possibly multi-line / multi-option), a `defifrom://` payment
-confirmation, or a bare eight-digit code — no JSON wrapper.
+request (possibly multi-line / multi-option) or a bare eight-digit code — no
+JSON wrapper. A `defifrom://` payment confirmation goes straight to the npub
+named in the invoice it answers and never passes through this broker.
 
 - Intent rides the `["i", <intent>]` tag: `request_code` / `code` /
   `request_uri` / `uri`. There is **no `error` intent** — a failure reuses the
@@ -27,8 +28,8 @@ confirmation, or a bare eight-digit code — no JSON wrapper.
 
 Decrypted `content` (the merchant's multi-option request):
 ```
-defito://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&tx=9f2c14ab7e5d4083b6a1cc90de3f7721
-defito://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&tx=9f2c14ab7e5d4083b6a1cc90de3f7721
+defito://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&orderid=9f2c14ab7e5d4083b6a1cc90de3f7721
+defito://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&orderid=9f2c14ab7e5d4083b6a1cc90de3f7721
 ```
 Event on relay:
 ```json
@@ -46,7 +47,7 @@ Event on relay:
   "sig": "…"
 }
 ```
-Server: read `i:request_code` → decrypt → validate every line uses the SAME one of our schemes (`defito://` here; `defifrom://` for a confirmation, and a payload mixing the two is refused) → `store.mint(uri, clampToSkew(created_at))` → 8-digit code (SQLite row), valid 5 min from the merchant's `created_at`, retained 1 h. Anything else → `i:code` with `Invalid Request` (a reason, not a code) + 24h blacklist (see error variant). A payload on a RIGHT scheme that omits a field the grammar always requires (`<networks>/<recipients>`, `amount=`, a decodable `nostr=<npub>`, plus `tx=` on a confirmation) gets the same reply WITHOUT the blacklist: a broken client is not an attacker. Past that the server validates nothing - networks, coins, address formats and amount values are the wallet's business, and it holds plaintext it never needed to understand. `tx` is likewise opaque here: we check it is PRESENT on a confirmation and never look at its contents, so the wallet is free to change how it mints one.
+Server: read `i:request_code` → decrypt → validate every line is a `defito://` invoice → `store.mint(uri, clampToSkew(created_at))` → 8-digit code (SQLite row), valid 5 min from the merchant's `created_at`, retained 1 h. Anything else → `i:code` with `Invalid Request` (a reason, not a code) + 24h blacklist (see error variant). A `defito://` payload that omits a field the grammar always requires (`<networks>/<recipients>`, `amount=`, `orderid=`, a decodable `nostr=<npub>`) gets the same reply WITHOUT the blacklist: a broken client is not an attacker. Past that the server validates nothing - networks, coins, address formats and amount values are the wallet's business, and it holds plaintext it never needed to understand. `orderid` is likewise opaque: we check it is PRESENT and never look at its contents, so the wallet is free to change how it mints one.
 
 ## Hop 2 — middleman → merchant (`i: code`)
 
@@ -101,8 +102,8 @@ Server: `store.redeem("42891337")` → found + unexpired → returns URI. **Not 
 
 Decrypted `content` (same multi-option URI the merchant sent):
 ```
-defito://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&tx=9f2c14ab7e5d4083b6a1cc90de3f7721
-defito://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&tx=9f2c14ab7e5d4083b6a1cc90de3f7721
+defito://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&orderid=9f2c14ab7e5d4083b6a1cc90de3f7721
+defito://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&orderid=9f2c14ab7e5d4083b6a1cc90de3f7721
 ```
 Event:
 ```json
@@ -141,7 +142,7 @@ failure) or `["i","code"]` (mint failure), `["expiration", …]`.
 - `"Code Not Found"` — never minted, or past its 1-h retention (purged). Reply `i:uri`.
 - `"Service Busy, Try Again"` — mint-time store overflow. Reply `i:code`.
 - `"Invalid Request"` — a `request_code` whose decrypted payload was not
-  one of our schemes. Reply `i:code`. The sender is also **blacklisted for 24 h**;
+  `defito://`. Reply `i:code`. The sender is also **blacklisted for 24 h**;
   further events from them are dropped silently until the block lapses.
 
 ## Notes

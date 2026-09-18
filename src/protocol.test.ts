@@ -6,7 +6,7 @@ import {
   extractIntent,
   parseInbound,
   isValidPaymentUri,
-  REGBY_URI_PREFIXES,
+  DEFITO_PREFIX,
 } from './protocol.ts';
 
 test('extractIntent reads a known i tag', () => {
@@ -28,24 +28,21 @@ test('extractIntent rejects unknown / absent', () => {
 const NPUB = 'npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef';
 const PUBKEY_HEX = 'ca89cb11f1c75d5b6622268ff43d2288ea8b2cb5b9aa996ff9ff704fc904b78b';
 const NPROFILE = nprofileEncode({ pubkey: PUBKEY_HEX });
+// 32 hex chars, no dashes - the shape the app mints. Opaque to this server.
+const ORDER = '9f2c14ab7e5d4083b6a1cc90de3f7721';
 
-test('REGBY_URI_PREFIXES is exactly the pair the app mirrors', () => {
-  // The lockstep with the app's `utils/regby.ts` is otherwise carried by prose
-  // alone, and a silent edit on either side mints codes the other refuses.
-  // This suite cannot see that repo, so pin what it can: these two, this order.
-  assert.deepEqual([...REGBY_URI_PREFIXES], ['defito://', 'defifrom://']);
+test('DEFITO_PREFIX is the word the app builds against', () => {
+  // The lockstep with the app is otherwise carried by prose alone, and a silent
+  // edit on either side mints codes the other refuses. This suite cannot see
+  // that repo, so pin what it can.
+  assert.equal(DEFITO_PREFIX, 'defito://');
 });
 
-test('isValidPaymentUri accepts a request or a confirmation, single or multi-line', () => {
+test('isValidPaymentUri accepts an invoice, single or multi-line', () => {
   assert.equal(isValidPaymentUri('defito://base/0xabc&amount=EURC:1.00&nostr=npub1x'), true);
+  // Several lines are the merchant's ranked fallback rails for ONE order.
   assert.equal(
     isValidPaymentUri('defito://base/0xabc&amount=EURC:1.00\ndefito://tron/T...&amount=USDT:1.18'),
-    true,
-  );
-  // A code stands in for either direction: a merchant's request the customer
-  // redeems, or a customer's confirmation the merchant redeems.
-  assert.equal(
-    isValidPaymentUri('defifrom://base/0xabc&amount=USDT:1&tx=0xdead&nostr=npub1x'),
     true,
   );
   // Case-insensitive, like the app's own check.
@@ -56,22 +53,20 @@ test('isValidPaymentUri accepts a request or a confirmation, single or multi-lin
   assert.equal(isValidPaymentUri('defito://a\n\n  \ndefito://b'), true);
 });
 
-test('isValidPaymentUri refuses a payload that mixes the two schemes', () => {
-  // A request and a confirmation mean opposite things. Refusing here means we
-  // never store one code that redeems as both, rather than leaving the wallet
-  // as the only thing standing between them.
-  assert.equal(isValidPaymentUri('defito://base/0xabc\ndefifrom://base/0xabc'), false);
-  // Both orders: picking the scheme off line ONE and testing the rest against
-  // it is the implementation that gets exactly one of these wrong.
-  assert.equal(isValidPaymentUri('defifrom://base/0xabc\ndefito://base/0xabc'), false);
+test('isValidPaymentUri refuses a confirmation, this broker never sees one', () => {
+  // Confirmations go straight to the invoice's npub; see `DEFITO_PREFIX`.
+  assert.equal(
+    isValidPaymentUri('defifrom://base/0xabc&amount=USDT:1&tx=0xdead&nostr=npub1x'),
+    false,
+  );
 });
 
 test('isValidPaymentUri splits on every line terminator, not just \\n', () => {
   // Regression: with a `\r?\n` split a lone `\r` was ordinary in-line text, so a
-  // second differently-schemed line rode inside what this file counted as one
-  // line and the scheme-agreement rule never saw it. That is the exact payload
-  // the rule exists to refuse, and the server is the untrusted hop holding it.
-  assert.equal(isValidPaymentUri('defito://base/0xabc\rdefifrom://base/0xdead'), false);
+  // second foreign-scheme line rode inside what this file counted as one line
+  // and the every-line-is-an-invoice rule never saw it. That is the exact
+  // payload the rule exists to refuse, and the server is the untrusted hop
+  // holding it.
   assert.equal(isValidPaymentUri('defito://base/0xabc\rhttps://evil.test'), false);
   assert.equal(isValidPaymentUri('defito://a\u2028https://evil.test'), false);
 });
@@ -80,7 +75,6 @@ test('isValidPaymentUri refuses a line that is only the scheme', () => {
   // Minting it burns a code and a round trip on something the wallet is certain
   // to reject at redeem, leaving the merchant a failure they cannot explain.
   assert.equal(isValidPaymentUri('defito://'), false);
-  assert.equal(isValidPaymentUri('defifrom://'), false);
   assert.equal(isValidPaymentUri('defito://a\ndefito://'), false);
 });
 
@@ -101,14 +95,14 @@ test('isValidPaymentUri rejects a foreign scheme or empty', () => {
 });
 
 test('parseInbound: request_code returns the raw uri', () => {
-  const uri = `defito://base/0xabc&amount=USDT:1&nostr=${NPUB}`;
+  const uri = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`;
   assert.deepEqual(parseInbound('request_code', uri), {
     ok: true,
     message: { intent: 'request_code', uri },
   });
   // The stored value is the plaintext verbatim — we never normalise a payload
   // we hand back to a wallet that will parse it strictly.
-  const mixedCase = `DeFiTo://base/0xAbC&Amount=USDT:1&NOSTR=${NPUB}`;
+  const mixedCase = `DeFiTo://base/0xAbC&Amount=USDT:1&OrderId=${ORDER}&NOSTR=${NPUB}`;
   assert.deepEqual(parseInbound('request_code', mixedCase), {
     ok: true,
     message: { intent: 'request_code', uri: mixedCase },
@@ -130,22 +124,25 @@ test('parseInbound: a missing required field is malformed, NOT malicious', () =>
   const malformed = (uri: string) =>
     assert.deepEqual(parseInbound('request_code', uri), { ok: false, reason: 'malformed' }, uri);
 
-  malformed(`defito://base/0xabc&amount=USDT:1`); // no nostr
-  malformed(`defito://base/0xabc&nostr=${NPUB}`); // no amount
-  malformed(`defito://base&amount=USDT:1&nostr=${NPUB}`); // no recipient segment
-  malformed(`defito://base/&amount=USDT:1&nostr=${NPUB}`); // empty recipient
-  malformed(`defito:///0xabc&amount=USDT:1&nostr=${NPUB}`); // empty network
+  malformed(`defito://base/0xabc&amount=USDT:1&orderid=${ORDER}`); // no nostr
+  malformed(`defito://base/0xabc&orderid=${ORDER}&nostr=${NPUB}`); // no amount
+  // Without an order id the confirmation that settles this invoice has nothing
+  // to echo, so the merchant could never match the payment to the order.
+  malformed(`defito://base/0xabc&amount=USDT:1&nostr=${NPUB}`);
+  malformed(`defito://base&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`); // no recipient
+  malformed(`defito://base/&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`); // empty recipient
+  malformed(`defito:///0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`); // empty network
   malformed(`defito://base/0xabc`); // no params at all
-  // A confirmation says nothing without the on-chain hash it is confirming.
-  malformed(`defifrom://base/0xabc&amount=USDT:1&nostr=${NPUB}`);
   // Only ONE line has to be short for the payload to be refused.
-  malformed(`defito://base/0xabc&amount=USDT:1&nostr=${NPUB}\ndefito://tron/Tabc&amount=USDT:1`);
+  malformed(
+    `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}\ndefito://tron/Tabc&amount=USDT:1`,
+  );
 });
 
 test('parseInbound: nostr must be a decodable identity key', () => {
   const malformed = (npub: string) =>
     assert.deepEqual(
-      parseInbound('request_code', `defito://base/0xabc&amount=USDT:1&nostr=${npub}`),
+      parseInbound('request_code', `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${npub}`),
       { ok: false, reason: 'malformed' },
       npub,
     );
@@ -155,23 +152,10 @@ test('parseInbound: nostr must be a decodable identity key', () => {
   malformed(PUBKEY_HEX); // bare hex has a tx hash's shape
   // `nprofile` carries a key too and the app accepts it, so we must as well or
   // we would refuse a payload the wallet built.
-  assert.deepEqual(
-    parseInbound('request_code', `defito://base/0xabc&amount=USDT:1&nostr=${NPROFILE}`),
-    {
-      ok: true,
-      message: {
-        intent: 'request_code',
-        uri: `defito://base/0xabc&amount=USDT:1&nostr=${NPROFILE}`,
-      },
-    },
-  );
-});
-
-test('parseInbound: a complete confirmation passes', () => {
-  const uri = `defifrom://base/0xabc&amount=USDT:1&tx=0xdead&nostr=${NPUB}`;
-  assert.deepEqual(parseInbound('request_code', uri), {
+  const withNprofile = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPROFILE}`;
+  assert.deepEqual(parseInbound('request_code', withNprofile), {
     ok: true,
-    message: { intent: 'request_code', uri },
+    message: { intent: 'request_code', uri: withNprofile },
   });
 });
 
@@ -210,8 +194,86 @@ test('extractIntent rejects the outbound intents echoed back at us', () => {
 
 test('parseInbound: oversized content dropped silently', () => {
   // Silent regardless of intent (no blacklist on a size flood).
-  assert.deepEqual(parseInbound('request_code', 'defito://a/b&amount=x&nostr=' + 'a'.repeat(5000)), {
-    ok: false,
-    reason: 'silent',
-  });
+  assert.deepEqual(
+    parseInbound('request_code', `defito://a/b&amount=x&orderid=${ORDER}&nostr=` + 'a'.repeat(5000)),
+    { ok: false, reason: 'silent' },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Cross-repo parity. These fixtures are duplicated VERBATIM in the app's
+// `__tests__/protocol-parity.test.ts`; if you change one list, change the
+// other. The two validators are deliberately different in scope - this server
+// checks far less, because chain and coin names come from a registry that
+// updates without a server deploy - but where both have an opinion they must
+// agree. A payload one accepts and the other refuses is either a code that
+// mints and never redeems, or a merchant whose POS mints nothing with no
+// diagnosable reason. Three such divergences were found by measurement:
+// duplicate keys, percent-encoded values, and the line-terminator set.
+// ---------------------------------------------------------------------------
+
+const PARITY_ACCEPTED: readonly string[] = [
+  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT&orderid=${ORDER}&nostr=${NPUB}`,
+  `defito://avalanche,base,tron/0xabc,TJRxyz&amount=USDT,USDC:123.45&orderid=${ORDER}&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}\ndefito://tron/TJRxyz&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`,
+  `DeFiTo://base/0xAbC&Amount=USDT:1&OrderId=${ORDER}&NOSTR=${NPUB}`,
+];
+
+const PARITY_REFUSED: readonly string[] = [
+  `defito://base/0xabc&amount=USDT:1&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}`,
+  `defito://base/0xabc&orderid=${ORDER}&nostr=${NPUB}`,
+  `defito://base&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`,
+  `defito://&orderid=${ORDER}&nostr=${NPUB}`,
+  'defito://',
+  `defipay://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`,
+  `defifrom://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}&tx=0xdead`,
+  'https://evil.test',
+  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}\rhttps://evil.test`,
+  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}\u2028https://evil.test`,
+  `defito://base/0xabc&amount=&amount=USDT:5&orderid=${ORDER}&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=&nostr=${NPUB}`,
+];
+
+test('parity: every payload the app parses, this server mints', () => {
+  for (const payload of PARITY_ACCEPTED) {
+    assert.deepEqual(
+      parseInbound('request_code', payload),
+      { ok: true, message: { intent: 'request_code', uri: payload } },
+      payload,
+    );
+  }
+});
+
+test('parity: every payload the app refuses, this server refuses', () => {
+  for (const payload of PARITY_REFUSED) {
+    const result = parseInbound('request_code', payload);
+    assert.equal(result.ok, false, `should be refused: ${JSON.stringify(payload)}`);
+  }
+});
+
+test('parity: a refusal keeps the right VERDICT, not merely ok:false', () => {
+  // The two verdicts cost the sender different things - `malicious` is a 24 h
+  // blacklist, `malformed` is a reply - so a payload drifting between them is a
+  // real regression that an `ok === false` assertion cannot see.
+  const reasonOf = (payload: string) => {
+    const result = parseInbound('request_code', payload);
+    return result.ok ? 'ok' : result.reason;
+  };
+  // Wrong scheme aimed at us after proving key possession: deliberate.
+  assert.equal(reasonOf('https://evil.test'), 'malicious');
+  assert.equal(reasonOf(`defipay://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`), 'malicious');
+  assert.equal(reasonOf(`defifrom://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`), 'malicious');
+  // Right scheme, field missing: a broken client, and no blacklist.
+  assert.equal(reasonOf(`defito://base/0xabc&amount=USDT:1&nostr=${NPUB}`), 'malformed');
+  assert.equal(reasonOf(`defito://base/0xabc&orderid=${ORDER}&nostr=${NPUB}`), 'malformed');
+  assert.equal(reasonOf(`defito://base&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`), 'malformed');
+});
+
+test('parity: a percent-encoded npub is read the same way as a plain one', () => {
+  // `%6E` is `n`. The app percent-decodes parameter values, so it saw a valid
+  // npub here while this server saw the raw escape and answered `malformed`.
+  const encoded = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB.replace(/^n/, '%6E')}`;
+  assert.equal(parseInbound('request_code', encoded).ok, true);
 });

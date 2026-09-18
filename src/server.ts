@@ -130,7 +130,7 @@ export class ReGBYBroker {
         return;
       }
       // Both remaining verdicts answer the sender; only `malicious` punishes.
-      // A `malformed` payload used one of our schemes but omitted a required
+      // A `malformed` payload was `defito://` but omitted a required
       // field, which is a broken client — telling them is the useful response,
       // and a 24 h lockout would just make a POS bug look like an outage.
       if (parsed.reason === 'malicious') {
