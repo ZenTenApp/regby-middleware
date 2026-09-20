@@ -63,11 +63,20 @@ comes from the event signature alone, never from a successful decrypt.
   sender. A payload that is **not `defito://`** is deliberate (the sender proved
   they hold the conversation key), so the server replies `i:code` with
   `Invalid Request` and **blacklists them for 24 h** (`REGBY_BLACKLIST_SECONDS`).
-  A `defito://` payload that **omits a field the grammar always requires**
-  (`<networks>/<recipients>`, `amount=`, `orderid=`, a decodable `nostr=<npub>`)
-  gets the same reply and **no blacklist** — that is a broken client, and a
-  day-long lockout would make a POS bug look like an outage. Undecryptable
-  noise and malformed codes are still dropped silently.
+  A `defito://` payload the **wallet would refuse at redeem** gets the same
+  reply and **no blacklist**: that is a broken client, and a day-long lockout
+  would make a POS bug look like an outage. Undecryptable noise and malformed
+  codes are still dropped silently.
+- What earns that softer refusal is exactly what the wallet screens, mirrored
+  field for field: a missing `<networks>/<recipients>`, `amount=`, `orderid=`
+  or decodable `nostr=<npub>`; an `amount=` whose shape is broken (`USDT:` is a
+  truncated amount, `:5` names no coin); hidden, bidi or markup characters
+  anywhere in the payload, read both as written and as the wallet will decode
+  them; and more than 20 lines, past which the wallet drops the surplus and
+  would show a request the merchant never wrote. A payload that passes here and
+  fails there is an eight-digit code that mints and never redeems, with no
+  reason the merchant can act on, so `src/protocol.test.ts` pins the accepted
+  and refused fixtures against the app's copy of the same list.
 - Nothing past that is validated here, on purpose. Chain names, coin symbols,
   address formats and amount values come from a stablecoin registry that updates
   without a server deploy, so a list frozen here would start refusing valid

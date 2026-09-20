@@ -61,8 +61,17 @@ const LINE_BREAK_RE = /\r\n|[\n\r\u2028\u2029]/;
 /** Codes are exactly eight decimal digits. */
 export const REGBY_CODE_RE = /^\d{8}$/;
 
-/** Upper bound on decrypted content we accept (multi-line URIs included). */
+/** Upper bound on decrypted content we accept (multi-line URIs included).
+ *  Mirrors `MAX_REDEEMED_URI_CHARS` in the app's `utils/regby.ts`. */
 export const MAX_CONTENT_LENGTH = 4096;
+
+/**
+ * Cap on the LINES of one payload. Mirrors `MAX_PAYLOAD_LINES` in the app's
+ * `utils/payment-uri.ts`: past this the wallet refuses the payload outright, so
+ * minting a code for it hands the merchant an eight-digit number that can never
+ * be redeemed.
+ */
+export const MAX_PAYLOAD_LINES = 20;
 
 /** Intent tag key. */
 export const INTENT_TAG = 'i';
@@ -98,10 +107,11 @@ export type InboundMessage =
  *    proved they hold the conversation key, so aiming a foreign scheme at us is
  *    deliberate → caller replies on the reused success intent (`code`,
  *    content = reason) AND blacklists the sender for 24 h.
- *  - `malformed` → `defito://`, but missing a field the grammar always
- *    requires. Caller replies with the same reason and does NOT
- *    blacklist: this is a broken client, not an attacker, and a 24 h lockout
- *    is the wrong answer to a merchant whose POS built a bad string.
+ *  - `malformed` → `defito://`, but the wallet would refuse it at redeem:
+ *    a missing required field, a broken `amount` shape, hostile text, or more
+ *    lines than the wallet parses. Caller replies with the same reason and does
+ *    NOT blacklist: this is a broken client, not an attacker, and a 24 h
+ *    lockout is the wrong answer to a merchant whose POS built a bad string.
  *  - `silent`    → junk we drop without a reply (empty/oversized, malformed
  *    code shape, or an outbound intent echoed back at us).
  */
@@ -127,9 +137,9 @@ export function extractIntent(tags: string[][]): InboundIntent | null {
 /**
  * Validate decrypted `content` for an inbound intent. A `request_code` whose
  * payload is not `defito://` is `malicious` (see ParseResult) so the caller can
- * blacklist the sender; one that IS `defito://` but omits a required field is
- * `malformed` and is NOT blacklisted; a malformed code shape is dropped
- * `silent`.
+ * blacklist the sender; one that IS `defito://` but that the wallet would
+ * refuse at redeem is `malformed` and is NOT blacklisted; a malformed code
+ * shape is dropped `silent`.
  */
 export function parseInbound(intent: InboundIntent, content: string): ParseResult {
   // Emptiness is tested on the TRIMMED content: `malicious` costs the sender a
@@ -141,9 +151,10 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
 
   if (intent === 'request_code') {
     // Two questions, two punishments: "is this even ours" (a foreign scheme is
-    // deliberate) then "is it complete" (a missing field is a broken client).
+    // deliberate) then "would the wallet take it" (anything it refuses is a
+    // broken client).
     if (!isValidPaymentUri(content)) return { ok: false, reason: 'malicious' };
-    if (!hasRequiredFields(content)) return { ok: false, reason: 'malformed' };
+    if (!wouldRedeem(content)) return { ok: false, reason: 'malformed' };
     return { ok: true, message: { intent, uri: content } };
   }
 
@@ -158,7 +169,7 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
  * `defito://` URI. The multiple lines are the merchant's ranked fallback rails
  * for ONE order, so they should share an `orderid` (not compared here).
  *
- * Only the scheme is checked here; field checks live in `hasRequiredFields`. A
+ * Only the scheme is checked here; the rest lives in `wouldRedeem`. A
  * line that is ONLY the scheme is still refused: minting it burns a code on
  * something the wallet is certain to reject at redeem.
  *
@@ -186,11 +197,37 @@ function payloadLines(content: string): string[] {
 }
 
 /**
- * Every line carries the fields the grammar ALWAYS requires. Checked separately
- * from the scheme because it earns a softer verdict (see ParseResult).
+ * Everything beyond the scheme that decides whether the WALLET will accept this
+ * payload at redeem: the payload-level screens, then the per-line grammar.
+ * Checked separately from the scheme because it earns a softer verdict (see
+ * ParseResult).
  *
- * This is the one validation beyond the scheme that is safe to run here,
- * because none of it can drift: the shape is fixed by the grammar, `orderid` is
+ * Each screen here mirrors one in the app (`sanitizeRedeemedUri` in
+ * `utils/regby.ts`, `parseDeFiToFields` in `utils/payment-uri.ts`). A payload
+ * that passes here and fails there is a code that mints and never redeems, with
+ * no reason the merchant can act on.
+ */
+function wouldRedeem(content: string): boolean {
+  const lines = payloadLines(content);
+  // The wallet drops everything past its own cap, so a longer payload would be
+  // redeemed as a request the merchant did not write.
+  if (lines.length > MAX_PAYLOAD_LINES) return false;
+  // Screened as the app writes it, BOTH as written and as it will be decoded:
+  // `%E2%80%AE` is seven innocent characters until the wallet unescapes it.
+  // Decoding never deletes a character, so the decoded form already subsumes
+  // the raw one; the pair is kept so the two screens stay diffable. `param`
+  // covers the three lifted fields, this covers the path halves and the extras.
+  if (isHostileText(content) || isHostileText(decodeLoose(content))) return false;
+  return lines.every(lineWouldRedeem);
+}
+
+/**
+ * Every line carries the fields the grammar ALWAYS requires, in the shapes it
+ * fixes. Only called after `isValidPaymentUri`, so every line starts with the
+ * prefix.
+ *
+ * Everything checked here is safe to check on this side because none of it can
+ * drift: the shape is fixed by the grammar, `orderid` is
  * an opaque token we only check the presence of, and `nostr` is a bech32 key
  * that decodes or does not. Chain names, coin symbols, address formats and
  * amount VALUES are deliberately still not checked. They come from a stablecoin
@@ -204,32 +241,54 @@ function payloadLines(content: string): string[] {
  * minting one burns a code and hands the merchant a failure with no
  * explanation attached.
  */
-function hasRequiredFields(content: string): boolean {
-  return payloadLines(content).every(lineHasRequiredFields);
-}
-
-/** Only called after `isValidPaymentUri`, so every line starts with the prefix. */
-function lineHasRequiredFields(line: string): boolean {
+function lineWouldRedeem(line: string): boolean {
   const rest = line.slice(DEFITO_PREFIX.length);
   // The canonical separator is `&`; `?` on the first param is also accepted.
   const qIdx = rest.search(/[?&]/);
   if (qIdx === -1) return false; // no params at all
   const path = rest.slice(0, qIdx);
 
-  // `<networks>/<recipients>` — both halves must be non-empty.
+  // `<networks>/<recipients>`: both are comma lists, and the wallet needs at
+  // least one entry in each, so `,,,/0xabc` is as dead as an empty half.
   const slash = path.indexOf('/');
-  if (slash <= 0) return false;
-  if (path.slice(slash + 1).trim().length === 0) return false;
+  if (slash === -1) return false;
+  if (csv(path.slice(0, slash)).length === 0) return false;
+  if (csv(path.slice(slash + 1)).length === 0) return false;
 
   const tail = rest.slice(qIdx + 1);
-  // A coin list is required; its `:<value>` half is optional (an invoice may
-  // ask the payer to key the figure in), and which it is stays the wallet's
-  // rule - we only check the parameter is present and non-empty.
-  if (!param(tail, 'amount')) return false;
+  if (!hasAmountShape(param(tail, 'amount'))) return false;
   // The order this invoice is for. The confirmation that settles it echoes this
   // value back, so an invoice without one can never be matched to its payment.
   if (!param(tail, 'orderid')) return false;
   return isIdentityKey(param(tail, 'nostr'));
+}
+
+/**
+ * `amount=<coins>[:<value>]`. The coin list is required; the value half is
+ * optional, because an invoice may ask the payer to key the figure in.
+ *
+ * Split at the LAST colon, as `parseDeFiToFields` does, so a stray colon in the
+ * coin list cannot swallow the value. Which coins exist is still the wallet's
+ * business - the registry lives there - but the SHAPE is fixed by the grammar:
+ * `USDT:` is a truncated amount the wallet refuses rather than a request with
+ * no value, and `:5` names no coin to pay in.
+ */
+function hasAmountShape(amount: string | undefined): boolean {
+  if (amount === undefined) return false;
+  const colon = amount.lastIndexOf(':');
+  if (colon === -1) return csv(amount).length > 0;
+  return csv(amount.slice(0, colon)).length > 0 && amount.slice(colon + 1).trim().length > 0;
+}
+
+/** Non-empty entries of a comma list, trimmed. Mirrors the app's `splitCsv`,
+ *  which also caps a list at `MAX_CSV_OPTIONS` and TRUNCATES the surplus rather
+ *  than refusing it - so there is no refusal to mirror, and imposing one here
+ *  would reject payloads the wallet accepts. */
+function csv(part: string): string[] {
+  return part
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -249,18 +308,14 @@ function param(tail: string, name: string): string | undefined {
     if (token.slice(0, eq).trim().toLowerCase() !== name) continue;
     const raw = token.slice(eq + 1).trim();
     if (!raw) return undefined;
-    let value: string;
-    try {
-      value = decodeURIComponent(raw);
-    } catch {
-      value = raw; // malformed escape - judge it on what it plainly says
-    }
+    const value = decodeLoose(raw);
     // The app DROPS a value carrying hidden/bidi characters or an injection
-    // marker, so a payload with one in `orderid` would mint a code here and be
-    // refused at redeem - the exact mismatch `hasRequiredFields` exists to
-    // prevent. `nostr` is covered anyway (bech32 will not decode one); the
-    // presence-checked fields are not, so without this they slip through.
-    return isHostileValue(value) ? undefined : value;
+    // marker, so one that survives here is a code that mints and is refused at
+    // redeem. Kept although `wouldRedeem` already screens the whole payload:
+    // when any OTHER parameter holds a malformed escape, that payload-level
+    // decode bails to the raw string, and only this per-value decode still sees
+    // `%E2%80%AE` for what it is.
+    return isHostileText(value) ? undefined : value;
   }
   return undefined;
 }
@@ -272,7 +327,17 @@ const HIDDEN_CHARS_RE =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/;
 const INJECTION_MARKERS: readonly string[] = ['javascript:', 'vbscript:', '<', '>', '\\'];
 
-function isHostileValue(value: string): boolean {
+/** Percent-decode for SCREENING only: a malformed escape yields the original,
+ *  so a broken payload is still judged on what it plainly says. */
+function decodeLoose(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function isHostileText(value: string): boolean {
   if (HIDDEN_CHARS_RE.test(value)) return true;
   const lower = value.toLowerCase();
   return INJECTION_MARKERS.some((marker) => lower.includes(marker));

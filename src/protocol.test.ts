@@ -7,6 +7,7 @@ import {
   parseInbound,
   isValidPaymentUri,
   DEFITO_PREFIX,
+  MAX_PAYLOAD_LINES,
 } from './protocol.ts';
 
 test('extractIntent reads a known i tag', () => {
@@ -218,6 +219,12 @@ const PARITY_ACCEPTED: readonly string[] = [
   `defito://avalanche,base,tron/0xabc,TJRxyz&amount=USDT,USDC:123.45&orderid=${ORDER}&nostr=${NPUB}`,
   `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}\ndefito://tron/TJRxyz&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`,
   `DeFiTo://base/0xAbC&Amount=USDT:1&OrderId=${ORDER}&NOSTR=${NPUB}`,
+  // Exactly at the wallet's line cap. Pinned from BOTH sides: an off-by-one
+  // that refused this would leave the refused fixture below still passing.
+  Array.from(
+    { length: MAX_PAYLOAD_LINES },
+    () => `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`,
+  ).join('\n'),
 ];
 
 const PARITY_REFUSED: readonly string[] = [
@@ -240,6 +247,26 @@ const PARITY_REFUSED: readonly string[] = [
   `defito://base/0xabc&amount=USDT:1&orderid=%E2%80%AE${ORDER}&nostr=${NPUB}`,
   // Space-separated foreign scheme - the app refuses it, so this must too.
   `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB} https://evil.test`,
+  // Amount SHAPE. The app splits at the last colon and requires a coin list on
+  // the left; a colon with nothing after it is a truncated amount, not a
+  // request that asks the payer to key the figure in.
+  `defito://base/0xabc&amount=USDT:&orderid=${ORDER}&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=:5&orderid=${ORDER}&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=,,,:5&orderid=${ORDER}&nostr=${NPUB}`,
+  // Hostile text OUTSIDE the three lifted fields. The app screens the whole
+  // payload before it parses anything, so the path halves and the extras are
+  // covered there and have to be covered here.
+  `defito://ba\u200Bse/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`,
+  `defito://base/0x\u202Eabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}&message=<script>`,
+  // An empty comma list names no network, so there is nothing to pay on.
+  `defito://,,,/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`,
+  // Past the wallet's line cap it drops the surplus, and a redeem would show a
+  // request the merchant never wrote.
+  Array.from(
+    { length: MAX_PAYLOAD_LINES + 1 },
+    () => `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`,
+  ).join('\n'),
 ];
 
 test('parity: every payload the app parses, this server mints', () => {
@@ -275,6 +302,13 @@ test('parity: a refusal keeps the right VERDICT, not merely ok:false', () => {
   assert.equal(reasonOf(`defito://base/0xabc&amount=USDT:1&nostr=${NPUB}`), 'malformed');
   assert.equal(reasonOf(`defito://base/0xabc&orderid=${ORDER}&nostr=${NPUB}`), 'malformed');
   assert.equal(reasonOf(`defito://base&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`), 'malformed');
+  // Right scheme, wallet-refusing payload: also a broken client, not a foreign
+  // scheme aimed at us, so it must not cost the sender a day of lockout.
+  assert.equal(reasonOf(`defito://base/0xabc&amount=USDT:&orderid=${ORDER}&nostr=${NPUB}`), 'malformed');
+  assert.equal(
+    reasonOf(`defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}&message=<script>`),
+    'malformed',
+  );
 });
 
 test('parity: a percent-encoded npub is read the same way as a plain one', () => {
