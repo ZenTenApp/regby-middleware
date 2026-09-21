@@ -2,7 +2,7 @@
   "name": "regby-middleware",
   "version": "0.1.0",
   "private": true,
-  "description": "Nostr middleman broker for ReGBY — BLIK-style coded payment requests (mints/redeems 6-digit codes over NIP-04 encrypted events).",
+  "description": "Nostr middleman broker for ReGBY — BLIK-style coded payment requests (mints/redeems 8-digit codes over NIP-04 encrypted events).",
   "type": "module",
   "engines": {
     "node": ">=22.5"

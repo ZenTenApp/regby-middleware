@@ -1,9 +1,14 @@
 # regby-middleware
 
 Nostr middleman broker for **ReGBY** — BLIK-style coded payment requests for the
-zenten-pay wallet. A merchant encrypts a `defipay://` request to this server's
+zenten-pay wallet. A merchant encrypts a `defito://` request to this server's
 npub; the server mints a short **8-digit code** and returns it. A customer
-redeems the code; the server returns the original URI. Every hop is a
+redeems the code; the server returns the original URI.
+
+A `defifrom://` payment **confirmation** never passes through here. It is sent
+straight to the npub named in the invoice it answers, so there is nothing for a
+middleman to do: this broker exists to squeeze an invoice into eight digits a
+customer can type, and nobody types a confirmation. Every hop is a
 **NIP-04 encrypted** Nostr **DM (kind 4)**.
 
 This server holds **no funds and no wallet keys** — only its own Nostr identity
@@ -14,7 +19,7 @@ See [`src/flow-examples.md`](src/flow-examples.md) for full event examples.
 ## Protocol
 
 Encrypted **DM (kind 4)**. `content` is the **raw value** (NIP-04 ciphertext on
-the wire): the `defipay://` URI (possibly multi-line / multi-option) or the bare
+the wire): a `defito://` URI (possibly multi-line / multi-option) or the bare
 eight-digit code — no JSON wrapper.
 
 NIP-04 is the required scheme on this kind, in both directions. It is
@@ -28,7 +33,7 @@ comes from the event signature alone, never from a successful decrypt.
 - **No `error` intent**: a failure reuses the request's success intent (`code`
   for a `request_code`, `uri` for a `request_uri`) and carries the reason string
   in `content`. The client tells a value from an error by the content's **shape**
-  (8 digits / `defipay://` prefix) and whitelist-sanitises anything else — the
+  (8 digits / a `defito://` prefix) and whitelist-sanitises anything else — the
   middleman is untrusted, so a free error-text channel was a hole into the UI.
 - **Correlation** is the `['e', <request-event-id>]` reply tag — the client
   matches a reply to the request it published. No in-band id.
@@ -38,25 +43,55 @@ comes from the event signature alone, never from a successful decrypt.
 
 | direction          | `i` tag        | `content` (decrypted)        |
 | ------------------ | -------------- | ---------------------------- |
-| merchant → server  | `request_code` | `defipay://…` URI            |
+| merchant → server  | `request_code` | `defito://…` URI             |
 | server → merchant  | `code`         | `42891337` *or* reason       |
 | customer → server  | `request_uri`  | `42891337`                   |
-| server → customer  | `uri`          | `defipay://…` URI *or* reason |
+| server → customer  | `uri`          | `defito://…` URI *or* reason |
 
 ## Behaviour
 
-- **request_code** → validate every line is `defipay://`, mint a unique 8-digit
-  code, store `code → { uri, expiresAt, retainUntil }`, reply `i:code` with the
-  requester's event id in `e`. **Code validity (5 min) is anchored to the request
+- **request_code** → validate every line is a `defito://` invoice, mint a
+  unique 8-digit code, store
+  `code → { uri, expiresAt, retainUntil }`, reply `i:code` with the requester's
+  event id in `e`. **Code validity (5 min) is anchored to the request
   event's `created_at`**, not server receive-time, so the merchant POS and the
   server count down from the same origin — the merchant already knows that
   timestamp (it signed the event), so no echo is needed. `created_at` is
   skew-clamped (`REGBY_CLOCK_SKEW_SECONDS`) to stop a forged future/stale stamp
   from gaming expiry.
-- A `request_code` whose decrypted payload is **not** `defipay://` is treated as
-  a deliberate bad request: the server replies `i:code` with `Invalid Request`
-  (not a code) and **blacklists the sender for 24 h** (`REGBY_BLACKLIST_SECONDS`).
-  Undecryptable noise and malformed codes are still dropped silently.
+- Two ways a `request_code` is refused, and they differ by what they cost the
+  sender. A payload that is **not `defito://`** is deliberate (the sender proved
+  they hold the conversation key), so the server replies `i:code` with
+  `Invalid Request` and **blacklists them for 24 h** (`REGBY_BLACKLIST_SECONDS`).
+  A `defito://` payload the **wallet would refuse at redeem** gets the same
+  reply and **no blacklist**: that is a broken client, and a day-long lockout
+  would make a POS bug look like an outage. Undecryptable noise and malformed
+  codes are still dropped silently.
+- What earns that softer refusal is exactly what the wallet screens, mirrored
+  field for field: a missing `<networks>/<recipients>`, `amount=`, `orderid=`
+  or decodable `nostr=<npub>`; an `amount=` whose shape is broken (`USDT:` is a
+  truncated amount, `:5` names no coin); hidden, bidi or markup characters
+  anywhere in the payload, read both as written and as the wallet will decode
+  them; and more than 20 lines, past which the wallet drops the surplus and
+  would show a request the merchant never wrote. The payload is judged
+  **trimmed**, as the wallet judges it, and `nostr=` is read as leniently
+  (a `nostr:` prefix and any casing decode the same).
+- A multi-line payload needs **one** redeemable rail, not every rail. The
+  wallet drops a line it cannot parse and pays from the rest, so refusing the
+  whole payload here cost the merchant a code the customer could have paid over
+  a rail the wallet was never going to show. An empty `defito://` rail is
+  likewise a broken client, never a foreign scheme: it must not earn the
+  blacklist. A payload that passes here and
+  fails there is an eight-digit code that mints and never redeems, with no
+  reason the merchant can act on, so `src/protocol.test.ts` pins the accepted
+  and refused fixtures against the app's copy of the same list.
+- Nothing past that is validated here, on purpose. Chain names, coin symbols,
+  address formats and amount values come from a stablecoin registry that updates
+  without a server deploy, so a list frozen here would start refusing valid
+  payloads the day a chain is added. `orderid` is likewise opaque: we check it
+  is present, never what it contains. The wallet re-validates all of it at
+  redeem, where the registry lives — and must anyway, since this server is
+  untrusted and nothing it approves is a safety guarantee.
 - **request_uri** → look up the code. Valid → reply `i:uri` with the URI.
   **Multi-use**: the code is *not* consumed — any number of customers can redeem
   it until it expires. Lapsed but still **retained** (within 1 h of its
@@ -109,7 +144,7 @@ comes from the event signature alone, never from a successful decrypt.
 - Decrypted URIs / live codes are logged only at `debug`.
 
 > **Trust note.** Between mint and redeem the server holds the plaintext
-> `defipay://` URI, so a compromised server could hand the customer a different
+> `defito://` URI, so a compromised server could hand the customer a different
 > recipient. The customer still confirms recipient + amount on-device before
 > signing. Future hardening (out of scope): merchant signs the URI, customer
 > verifies against the merchant npub.

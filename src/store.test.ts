@@ -21,17 +21,17 @@ function memStore(clock = fixedClock(), max = 100): CodeStore {
 
 test('mint then redeem returns the uri', () => {
   const store = memStore();
-  const minted = store.mint('defipay://base/0xabc', 1000);
+  const minted = store.mint('defito://base/0xabc', 1000);
   assert.ok(minted);
   assert.match(minted.code, /^\d{8}$/);
-  assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defipay://base/0xabc' });
+  assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
 });
 
 test('expiry is anchored to startedAt, not server now', () => {
   const clock = fixedClock();
   const store = memStore(clock);
   // Merchant event created 100s before the server received it.
-  const minted = store.mint('defipay://base/0xabc', clock.now() - 100);
+  const minted = store.mint('defito://base/0xabc', clock.now() - 100);
   assert.ok(minted);
   assert.equal(minted.expiresAt, clock.now() - 100 + TTL);
 });
@@ -39,17 +39,17 @@ test('expiry is anchored to startedAt, not server now', () => {
 test('mint rejects an already-expired anchor', () => {
   const clock = fixedClock();
   const store = memStore(clock);
-  assert.equal(store.mint('defipay://base/0xabc', clock.now() - TTL), null);
+  assert.equal(store.mint('defito://base/0xabc', clock.now() - TTL), null);
 });
 
 test('redeem is multi-use within validity', () => {
   const clock = fixedClock();
   const store = memStore(clock);
-  const minted = store.mint('defipay://base/0xabc', clock.now());
+  const minted = store.mint('defito://base/0xabc', clock.now());
   assert.ok(minted);
   for (let i = 0; i < 5; i++) {
     clock.tick(30);
-    assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defipay://base/0xabc' });
+    assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
   }
   assert.equal(store.size, 1);
 });
@@ -57,7 +57,7 @@ test('redeem is multi-use within validity', () => {
 test('past validity but within retention reports expired and KEEPS the row', () => {
   const clock = fixedClock();
   const store = memStore(clock);
-  const minted = store.mint('defipay://base/0xabc', clock.now());
+  const minted = store.mint('defito://base/0xabc', clock.now());
   assert.ok(minted);
   clock.tick(TTL); // exactly at expiry
   // Reported expired repeatedly — the row survives for the whole retention window.
@@ -70,7 +70,7 @@ test('past validity but within retention reports expired and KEEPS the row', () 
 test('past retention reports not-found and purges the row', () => {
   const clock = fixedClock();
   const store = memStore(clock);
-  const minted = store.mint('defipay://base/0xabc', clock.now());
+  const minted = store.mint('defito://base/0xabc', clock.now());
   assert.ok(minted);
   clock.tick(RETAIN); // at retention boundary
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
@@ -83,17 +83,17 @@ test('redeem of unknown code reports not-found', () => {
 
 test('mint returns null when at capacity', () => {
   const store = memStore(fixedClock(), 1);
-  assert.ok(store.mint('defipay://a', 1000));
-  assert.equal(store.mint('defipay://b', 1000), null);
+  assert.ok(store.mint('defito://a', 1000));
+  assert.equal(store.mint('defito://b', 1000), null);
 });
 
 test('sweep frees capacity taken by rows past retention', () => {
   const clock = fixedClock();
   const store = memStore(clock, 1);
-  assert.ok(store.mint('defipay://a', clock.now()));
+  assert.ok(store.mint('defito://a', clock.now()));
   clock.tick(RETAIN);
   // mint() sweeps first, so the retained-then-expired entry is reclaimed.
-  assert.ok(store.mint('defipay://b', clock.now()));
+  assert.ok(store.mint('defito://b', clock.now()));
   assert.equal(store.size, 1);
 });
 
@@ -102,7 +102,7 @@ test('mint records created_at = server now', () => {
   const now = 1_700_000_000;
   try {
     const store = new CodeStore(TTL, RETAIN, 100, path, () => now);
-    const minted = store.mint('defipay://base/0xabc', now - 50); // anchor before now
+    const minted = store.mint('defito://base/0xabc', now - 50); // anchor before now
     assert.ok(minted);
     store.close();
     const db = new DatabaseSync(path);
@@ -129,9 +129,9 @@ test('RotatingCodeStore switches files at the UTC day boundary', () => {
   const day1 = dailyDbPath(base, clock.now());
   try {
     const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
-    const minted = store.mint('defipay://base/0xabc', clock.now());
+    const minted = store.mint('defito://base/0xabc', clock.now());
     assert.ok(minted);
-    assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defipay://base/0xabc' });
+    assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
     // Next UTC day → a fresh, empty file; yesterday's code is unreachable
     // (current-day-only, by design). The redeem is the op that triggers the
     // lazy rotation; `size` then reflects the new (empty) file.
@@ -153,13 +153,13 @@ test('codes persist across a restart (reopen the same file)', () => {
   const now = 1_000_000;
   try {
     const first = new CodeStore(TTL, RETAIN, 100, path, () => now);
-    const minted = first.mint('defipay://base/0xabc', now);
+    const minted = first.mint('defito://base/0xabc', now);
     assert.ok(minted);
     first.close();
 
     // Fresh instance over the same file — the prior code is still redeemable.
     const second = new CodeStore(TTL, RETAIN, 100, path, () => now);
-    assert.deepEqual(second.redeem(minted.code), { ok: true, uri: 'defipay://base/0xabc' });
+    assert.deepEqual(second.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
     second.close();
   } finally {
     for (const suffix of ['', '-wal', '-shm']) rmSync(path + suffix, { force: true });
