@@ -67,6 +67,16 @@ export const REGBY_CODE_RE = /^\d{8}$/;
 export const MAX_CONTENT_LENGTH = 4096;
 
 /**
+ * Upper bound on what we STORE. The grammar bound above is measured trimmed,
+ * because that is the string the wallet judges - but we keep `content`
+ * verbatim, so without this a sender pads 4096 valid characters with unlimited
+ * whitespace and we persist all of it. The slack is deliberate: padding is a
+ * broken emitter long before it is an attack, and the trimmed bound is the one
+ * that has to agree with the app.
+ */
+const MAX_STORED_LENGTH = MAX_CONTENT_LENGTH * 2;
+
+/**
  * Cap on the LINES of one payload. Mirrors `MAX_PAYLOAD_LINES` in the app's
  * `utils/payment-uri.ts`: past this the wallet refuses the payload outright, so
  * minting a code for it hands the merchant an eight-digit number that can never
@@ -108,10 +118,10 @@ export type InboundMessage =
  *    proved they hold the conversation key, so aiming a foreign scheme at us is
  *    deliberate → caller replies on the reused success intent (`code`,
  *    content = reason) AND blacklists the sender for 24 h.
- *  - `malformed` → `defito://`, but the wallet would refuse it at redeem:
- *    a missing required field, a broken `amount` shape, hostile text, or more
- *    lines than the wallet parses. Caller replies with the same reason and does
- *    NOT blacklist: this is a broken client, not an attacker, and a 24 h
+ *  - `malformed` → `defito://`, but the wallet would refuse it at redeem: NO
+ *    rail carries the required fields in the shapes the grammar fixes, or a
+ *    payload-level screen fails (hostile text, more lines than the wallet
+ *    parses). Caller replies with the same reason and does NOT blacklist: this is a broken client, not an attacker, and a 24 h
  *    lockout is the wrong answer to a merchant whose POS built a bad string.
  *  - `silent`    → junk we drop without a reply (empty/oversized, malformed
  *    code shape, or an outbound intent echoed back at us).
@@ -156,6 +166,7 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
   if (trimmed.length === 0 || trimmed.length > MAX_CONTENT_LENGTH) {
     return { ok: false, reason: 'silent' };
   }
+  if (content.length > MAX_STORED_LENGTH) return { ok: false, reason: 'silent' };
 
   if (intent === 'request_code') {
     // Two questions, two punishments: "is this even ours" (a foreign scheme is
@@ -167,9 +178,8 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
   }
 
   // request_uri
-  const code = content.trim();
-  if (!REGBY_CODE_RE.test(code)) return { ok: false, reason: 'silent' };
-  return { ok: true, message: { intent, code } };
+  if (!REGBY_CODE_RE.test(trimmed)) return { ok: false, reason: 'silent' };
+  return { ok: true, message: { intent, code: trimmed } };
 }
 
 /**
@@ -225,6 +235,10 @@ function wouldRedeem(content: string): boolean {
   // the raw one; the pair is kept so the two screens stay diffable. `param`
   // covers the three lifted fields, this covers the path halves and the extras.
   if (isHostileText(content) || isHostileText(decodeLoose(content))) return false;
+  // Both screens above are payload-level, deliberately NOT per-rail: the wallet
+  // throws the WHOLE payload away on either, so a good rail beside a hostile
+  // one saves nothing.
+  //
   // ANY rail, not every rail. The wallet drops a line it cannot parse and pays
   // from the rest, so a payload with one broken rail and one good one redeems
   // there - and refusing it here costs the merchant a code the customer could

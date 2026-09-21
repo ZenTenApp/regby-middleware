@@ -33,16 +33,12 @@ const NPROFILE = nprofileEncode({ pubkey: PUBKEY_HEX });
 const ORDER = '9f2c14ab7e5d4083b6a1cc90de3f7721';
 
 test('the shared constants are the values the app builds against', () => {
-  // The parity lists below spell 20 and 21 literally, because they are copied
-  // verbatim from the app's file. That is only safe while this holds.
-  assert.equal(MAX_PAYLOAD_LINES, 20);
-});
-
-test('DEFITO_PREFIX is the word the app builds against', () => {
-  // The lockstep with the app is otherwise carried by prose alone, and a silent
+  // Lockstep with the app is otherwise carried by prose alone, and a silent
   // edit on either side mints codes the other refuses. This suite cannot see
-  // that repo, so pin what it can.
+  // that repo, and the parity lists below spell 20 and 21 literally because
+  // they are copied from the app's file - so pin what it can.
   assert.equal(DEFITO_PREFIX, 'defito://');
+  assert.equal(MAX_PAYLOAD_LINES, 20);
 });
 
 test('isValidPaymentUri accepts an invoice, single or multi-line', () => {
@@ -78,7 +74,7 @@ test('isValidPaymentUri splits on every line terminator, not just \\n', () => {
   assert.equal(isValidPaymentUri('defito://a\u2028https://evil.test'), false);
 });
 
-test('a bare scheme is an empty rail, not a foreign one', () => {
+test('isValidPaymentUri: a bare scheme is an empty rail, not a foreign one', () => {
   // It carries our scheme, so it clears the gate that earns a 24 h blacklist
   // and is judged with the rest. The old check refused it HERE, which billed a
   // POS that rendered one empty rail for a day of lockout - measured against
@@ -164,6 +160,17 @@ test('parseInbound: one broken rail does not sink the payload', () => {
       uri,
     );
   }
+});
+
+test('parseInbound: padding is bounded even though the grammar is judged trimmed', () => {
+  // The grammar bound is measured TRIMMED, to agree with the app - but we store
+  // `content` verbatim, so whitespace is only free up to the storage bound.
+  const good = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`;
+  assert.equal(parseInbound('request_code', `${' '.repeat(3000)}${good}`).ok, true);
+  assert.deepEqual(parseInbound('request_code', `${' '.repeat(9000)}${good}`), {
+    ok: false,
+    reason: 'silent',
+  });
 });
 
 test('parseInbound: the wallet trims before it screens, so we do too', () => {
@@ -252,11 +259,14 @@ test('parseInbound: oversized content dropped silently', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Cross-repo parity. The two lists below are duplicated ENTRY FOR ENTRY in the
-// app's `__tests__/protocol-parity.test.ts` - same payloads, same order, same
-// `REQUIRED` spelling - so a diff of the two files shows the contract drifting.
-// Change one list, change the other. Cases that only this side has a use for
-// live in `LOCAL_REFUSED` below, which is deliberately NOT shared.
+// Cross-repo parity. The two lists below hold the same payloads in the same
+// order as the app's `__tests__/protocol-parity.test.ts`, with the same
+// `REQUIRED` spelling, so the two files read side by side and a payload added
+// to one is visibly missing from the other. Change one list, change the other.
+// The ONE textual difference is deliberate: where the app writes a raw U+2028
+// into its source, this file writes the `\u2028` escape, because an invisible
+// line separator in a source file is a trap for the next editor. Cases only
+// this side has a use for live in `LOCAL_REFUSED` below, which is not shared.
 //
 // The two validators are deliberately different in scope - this server checks
 // far less, because chain and coin names come from a registry that updates
@@ -293,7 +303,7 @@ const PARITY_REFUSED: readonly string[] = [
   `defifrom://base/0xabc&amount=USDT:1${REQUIRED}&tx=0xdead`, // never brokered
   'https://evil.test',
   `defito://base/0xabc&amount=USDT:1${REQUIRED}\rhttps://evil.test`, // lone CR
-  `defito://base/0xabc&amount=USDT:1${REQUIRED} https://evil.test`,
+  `defito://base/0xabc&amount=USDT:1${REQUIRED}\u2028https://evil.test`,
   `defito://base/0xabc&amount=&amount=USDT:5${REQUIRED}`, // first key wins, empty
   `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=&nostr=${NPUB}`,
   // A hostile value in a presence-checked field. The app drops it in
@@ -321,17 +331,18 @@ const PARITY_REFUSED: readonly string[] = [
 ];
 
 /**
- * Refused here and by the app, but NOT part of the shared list: each one is the
- * mirror image of a shared fixture (the same screen, the other position or the
- * undecoded spelling), so duplicating them across repos would buy coverage
- * neither side lacks.
+ * Refused here and by the app, but kept out of the shared list: each is either
+ * the other position or the other spelling of a screen the shared list already
+ * pins, so copying it into the app's file would buy coverage neither side
+ * lacks. `,,,/0xabc` is the one that earns its place on its own - it is the
+ * only case exercising `csv()` on a network half that is all separators.
  */
 const LOCAL_REFUSED: readonly string[] = [
   `defito://ba\u200Bse/0xabc&amount=USDT:1${REQUIRED}`, // ZWSP in the network word
   `defito://base/0x\u202Eabc&amount=USDT:1${REQUIRED}`, // RLO in the recipient
   `defito://base/0xabc&amount=USDT:1${REQUIRED}&message=<script>`, // undecoded
   `defito://,,,/0xabc&amount=USDT:1${REQUIRED}`, // a comma list naming nothing
-  `defito://base/0xabc&amount=USDT:1${REQUIRED}\u2028https://evil.test`,
+  `defito://base/0xabc&amount=USDT:1${REQUIRED} https://evil.test`, // space, no break
 ];
 
 test('parity: every payload the app parses, this server mints', () => {

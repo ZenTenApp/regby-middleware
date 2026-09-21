@@ -75,16 +75,16 @@ comes from the event signature alone, never from a successful decrypt.
   them; and more than 20 lines, past which the wallet drops the surplus and
   would show a request the merchant never wrote. The payload is judged
   **trimmed**, as the wallet judges it, and `nostr=` is read as leniently
-  (a `nostr:` prefix and any casing decode the same).
+  (a `nostr:` prefix and any casing decode the same). A payload that passes
+  here and fails there is an eight-digit code that mints and never redeems,
+  with no reason the merchant can act on, so `src/protocol.test.ts` pins the
+  accepted and refused fixtures against the app's copy of the same list.
 - A multi-line payload needs **one** redeemable rail, not every rail. The
   wallet drops a line it cannot parse and pays from the rest, so refusing the
-  whole payload here cost the merchant a code the customer could have paid over
-  a rail the wallet was never going to show. An empty `defito://` rail is
+  whole payload here costs the merchant a code the customer could have paid
+  over a rail the wallet was never going to show. An empty `defito://` rail is
   likewise a broken client, never a foreign scheme: it must not earn the
-  blacklist. A payload that passes here and
-  fails there is an eight-digit code that mints and never redeems, with no
-  reason the merchant can act on, so `src/protocol.test.ts` pins the accepted
-  and refused fixtures against the app's copy of the same list.
+  blacklist.
 - Nothing past that is validated here, on purpose. Chain names, coin symbols,
   address formats and amount values come from a stablecoin registry that updates
   without a server deploy, so a list frozen here would start refusing valid
