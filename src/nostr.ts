@@ -81,7 +81,12 @@ export function createTransport(
   relays: string[],
   eventExpirySeconds: number,
 ): ReGBYTransport {
-  const pool = new SimplePool();
+  // Ping is on so a socket the relay (or a NAT in between) dropped silently is
+  // noticed and closed, instead of swallowing every REQ/EVENT written to it for
+  // the life of the process. Reconnect stays off: the subscription's resubscribe
+  // timer already re-opens a closed relay, and a second reconnect path racing
+  // `ensureRelay` for the same URL would buy nothing but two sockets.
+  const pool = new SimplePool({ enablePing: true });
   const deletions = new DeletionQueue();
 
   // The DM relays gate write (and may gate read) operations behind NIP-42 AUTH.
@@ -109,6 +114,42 @@ export function createTransport(
   const AUTH_WAIT_MS = 3_000;
   const AUTH_POLL_MS = 50;
 
+  // EVERY relay step is bounded, because an unbounded one hung replies in
+  // production: requests arrived and codes were minted, but no reply was ever
+  // published and nothing was logged. `ensureRelay` used to be called with no
+  // connection timeout, and `connect()` hands any later caller the same
+  // in-flight `connectionPromise` whatever timeout THAT caller asked for, so a
+  // socket whose handshake never completed stalled every auth and publish on
+  // that relay. `relay.auth` is memoised the same way and never settles if its
+  // signer throws. And since a reply waited on all relays before publishing to
+  // any, one stuck relay silenced the healthy one too.
+  const CONNECT_TIMEOUT_MS = 5_000;
+  const AUTH_SETTLE_MS = 8_000;
+  const PUBLISH_SETTLE_MS = 15_000;
+
+  /** Rejects with `reason` if `promise` has not settled within `ms`. */
+  const within = async <T>(promise: Promise<T>, ms: number, reason: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(reason)), ms);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // A timed-out auth or publish means the socket's memoised promises are dead,
+  // and only a fresh connection clears them. Closing drops it from the pool so
+  // the next `ensureRelay` builds a new one.
+  const dropRelay = (url: string, reason: string): void => {
+    logger.warn('Dropping wedged relay socket', { relay: url, reason });
+    pool.close([url]);
+  };
+
   // `relay.challenge` is private in nostr-tools' types, so poll `auth()` itself:
   // before the challenge lands it throws "can't perform auth, no challenge was
   // received", which is a retry, not a failure.
@@ -116,13 +157,17 @@ export function createTransport(
     err instanceof Error && err.message.includes('no challenge');
 
   const authenticateRelay = async (url: string): Promise<void> => {
-    const relay = await pool.ensureRelay(url);
+    const relay = await pool.ensureRelay(url, { connectionTimeout: CONNECT_TIMEOUT_MS });
     const deadline = Date.now() + AUTH_WAIT_MS;
     for (;;) {
       try {
-        await relay.auth(onauth);
+        await within(relay.auth(onauth), AUTH_SETTLE_MS, 'relay auth never settled');
         return;
       } catch (err) {
+        if (err instanceof Error && err.message === 'relay auth never settled') {
+          dropRelay(url, err.message);
+          throw err;
+        }
         if (!isMissingChallenge(err)) throw err;
         // Still no challenge by the deadline: an open relay (AUTH never
         // offered) or one too slow. Proceed unauthenticated rather than stall
@@ -138,6 +183,34 @@ export function createTransport(
     const failures = collectRejections(results, relays);
     if (failures.length > 0) logger.warn('Relay AUTH failed', { failures });
   };
+
+  /**
+   * Auth then publish on ONE relay, bounded end to end. Each relay runs this
+   * independently, so a stuck relay costs only its own copy of the event.
+   */
+  const publishToRelay = async (url: string, event: VerifiedEvent): Promise<string> => {
+    // An auth failure is not fatal here: publish anyway and let the relay's
+    // own refusal be the reason we report.
+    await authenticateRelay(url).catch((err: unknown) => {
+      logger.warn('Relay AUTH failed', { relay: url, reason: err instanceof Error ? err.message : String(err) });
+    });
+    const [attempt] = pool.publish([url], event, { onauth });
+    if (!attempt) throw new Error('no publish attempt');
+    let reason: string;
+    try {
+      reason = await within(attempt, PUBLISH_SETTLE_MS, 'publish never settled');
+    } catch (err) {
+      if (err instanceof Error && err.message === 'publish never settled') dropRelay(url, err.message);
+      throw err;
+    }
+    // nostr-tools RESOLVES a relay it could not connect to with this string
+    // rather than rejecting, which would otherwise count as an acceptance.
+    if (reason.startsWith('connection failure')) throw new Error(reason);
+    return reason;
+  };
+
+  const publishToAll = (event: VerifiedEvent): Promise<PromiseSettledResult<string>[]> =>
+    Promise.allSettled(relays.map((url) => publishToRelay(url, event)));
 
   // No conversation-key cache under NIP-04: `nip04.encrypt`/`decrypt` take the
   // secret key and the peer pubkey and do the ECDH internally, with no API for
@@ -158,8 +231,7 @@ export function createTransport(
         },
         secretKey,
       );
-      await ensureAuthed();
-      const results = await Promise.allSettled(pool.publish(relays, event, { onauth }));
+      const results = await publishToAll(event);
       const rejections = collectRejections(results, relays);
       logger.debug('Published deletion', {
         count: batch.length,
@@ -259,9 +331,9 @@ export function createTransport(
       deletions.add(event.id, expiresAt);
       // Same ordering rule as the subscription: a write on these relays is
       // AUTH-gated too, and `publish` neither waits for AUTH nor retries after
-      // an `auth-required` OK:false.
-      await ensureAuthed();
-      const results = await Promise.allSettled(pool.publish(relays, event, { onauth }));
+      // an `auth-required` OK:false. Auth runs per relay inside `publishToAll`,
+      // so a stuck relay cannot hold the reply back from a healthy one.
+      const results = await publishToAll(event);
       const accepted = results.filter((r) => r.status === 'fulfilled').length;
       const rejections = collectRejections(results, relays);
       logger.debug('Published reply', {
