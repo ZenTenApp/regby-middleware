@@ -61,8 +61,9 @@ const LINE_BREAK_RE = /\r\n|[\n\r\u2028\u2029]/;
 /** Codes are exactly eight decimal digits. */
 export const REGBY_CODE_RE = /^\d{8}$/;
 
-/** Upper bound on decrypted content we accept (multi-line URIs included).
- *  Mirrors `MAX_REDEEMED_URI_CHARS` in the app's `utils/regby.ts`. */
+/** Upper bound on decrypted content we accept, measured TRIMMED as the app
+ *  measures it (multi-line URIs included). Mirrors `MAX_REDEEMED_URI_CHARS` in
+ *  the app's `utils/regby.ts`. */
 export const MAX_CONTENT_LENGTH = 4096;
 
 /**
@@ -142,10 +143,17 @@ export function extractIntent(tags: string[][]): InboundIntent | null {
  * shape is dropped `silent`.
  */
 export function parseInbound(intent: InboundIntent, content: string): ParseResult {
-  // Emptiness is tested on the TRIMMED content: `malicious` costs the sender a
-  // 24 h blacklist, and three spaces from a buggy client is noise, not proof of
-  // deliberate abuse. Only a payload with something in it can earn that.
-  if (content.trim().length === 0 || content.length > MAX_CONTENT_LENGTH) {
+  // Every judgement below is made on the TRIMMED payload, because that is the
+  // string the wallet judges (`sanitizeRedeemedUri` trims before it screens or
+  // measures). Screening the untrimmed one refused payloads the wallet takes:
+  // a trailing BOM is a hidden character until `trim` removes it, and a payload
+  // that fits 4096 only after trimming was dropped silently. What we STORE is
+  // still `content` verbatim - see `isValidPaymentUri`.
+  const trimmed = content.trim();
+  // `malicious` costs the sender a 24 h blacklist, and three spaces from a
+  // buggy client is noise, not proof of deliberate abuse. Only a payload with
+  // something in it can earn that.
+  if (trimmed.length === 0 || trimmed.length > MAX_CONTENT_LENGTH) {
     return { ok: false, reason: 'silent' };
   }
 
@@ -153,8 +161,8 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
     // Two questions, two punishments: "is this even ours" (a foreign scheme is
     // deliberate) then "would the wallet take it" (anything it refuses is a
     // broken client).
-    if (!isValidPaymentUri(content)) return { ok: false, reason: 'malicious' };
-    if (!wouldRedeem(content)) return { ok: false, reason: 'malformed' };
+    if (!isValidPaymentUri(trimmed)) return { ok: false, reason: 'malicious' };
+    if (!wouldRedeem(trimmed)) return { ok: false, reason: 'malformed' };
     return { ok: true, message: { intent, uri: content } };
   }
 
@@ -169,9 +177,10 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
  * `defito://` URI. The multiple lines are the merchant's ranked fallback rails
  * for ONE order, so they should share an `orderid` (not compared here).
  *
- * Only the scheme is checked here; the rest lives in `wouldRedeem`. A
- * line that is ONLY the scheme is still refused: minting it burns a code on
- * something the wallet is certain to reject at redeem.
+ * Only the scheme is checked here; the rest lives in `wouldRedeem`. A line
+ * that is ONLY the scheme carries the scheme, so it passes THIS gate and is
+ * judged there - it is an empty rail, not a foreign one, and an empty rail must
+ * never cost a merchant the 24 h blacklist a foreign scheme earns.
  *
  * Note what this normalises is not what `parseInbound` stores: validation trims
  * and lowercases each line, storage keeps `content` verbatim. That is on
@@ -183,9 +192,7 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
 export function isValidPaymentUri(content: string): boolean {
   const lines = payloadLines(content).map((l) => l.toLowerCase());
   if (lines.length === 0) return false;
-  return lines.every(
-    (l) => l.startsWith(DEFITO_PREFIX) && l.length > DEFITO_PREFIX.length,
-  );
+  return lines.every((l) => l.startsWith(DEFITO_PREFIX));
 }
 
 /** Trimmed non-empty lines, split on every terminator in `LINE_BREAK_RE`. */
@@ -218,12 +225,18 @@ function wouldRedeem(content: string): boolean {
   // the raw one; the pair is kept so the two screens stay diffable. `param`
   // covers the three lifted fields, this covers the path halves and the extras.
   if (isHostileText(content) || isHostileText(decodeLoose(content))) return false;
-  return lines.every(lineWouldRedeem);
+  // ANY rail, not every rail. The wallet drops a line it cannot parse and pays
+  // from the rest, so a payload with one broken rail and one good one redeems
+  // there - and refusing it here costs the merchant a code the customer could
+  // have paid, over a rail the wallet was never going to show. Only a payload
+  // with nothing redeemable left is refused, which is what the wallet does too.
+  return lines.some(lineWouldRedeem);
 }
 
 /**
- * Every line carries the fields the grammar ALWAYS requires, in the shapes it
- * fixes. Only called after `isValidPaymentUri`, so every line starts with the
+ * One rail carries the fields the grammar ALWAYS requires, in the shapes it
+ * fixes. A payload needs one rail that does (see `wouldRedeem`), not all of
+ * them. Only called after `isValidPaymentUri`, so the line starts with the
  * prefix.
  *
  * Everything checked here is safe to check on this side because none of it can
@@ -343,16 +356,26 @@ function isHostileText(value: string): boolean {
   return INJECTION_MARKERS.some((marker) => lower.includes(marker));
 }
 
+const NOSTR_URI_PREFIX = 'nostr:';
+
 /**
  * A bech32 Nostr identity key. `npub` and `nprofile` both carry one, and the
  * app accepts either, so we must too or we would refuse payloads it builds.
  * A NIP-05 string and a bare hex pubkey are NOT keys here, matching the app:
  * the first names a recipient to look up, the second has a tx hash's shape.
+ *
+ * The normalisation mirrors `parseNostrIdentifier` in the app's
+ * `utils/nostr-identifier.ts`: a `nostr:` URI prefix is stripped and the value
+ * is lowercased before decoding. Bech32 is case-insensitive as a format, so an
+ * emitter that spells the key `NOSTR:NPUB1…` builds a payload the wallet reads
+ * and this server used to refuse.
  */
 function isIdentityKey(value: string | undefined): boolean {
   if (value === undefined) return false;
+  const lower = value.trim().toLowerCase();
+  const bare = lower.startsWith(NOSTR_URI_PREFIX) ? lower.slice(NOSTR_URI_PREFIX.length) : lower;
   try {
-    const { type } = decode(value);
+    const { type } = decode(bare);
     return type === 'npub' || type === 'nprofile';
   } catch {
     return false; // bad checksum, truncated, or not bech32 at all
