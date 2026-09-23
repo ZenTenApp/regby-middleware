@@ -105,7 +105,10 @@ export function loadConfig(): Config {
     throw new Error('REGBY_CODE_RETAIN_SECONDS must be >= REGBY_CODE_TTL_SECONDS');
   }
 
-  const eventExpirySeconds = intEnv('REGBY_EVENT_EXPIRY_SECONDS', 3600);
+  // Default is the relays' full 72h window less a one-minute clock-skew margin:
+  // they compare the stamp against THEIR clock, so an exact-72h stamp bounces
+  // on a host running even a second fast. Mirrors the app's `RELAY_EXPIRY_MS`.
+  const eventExpirySeconds = intEnv('REGBY_EVENT_EXPIRY_SECONDS', REGBY_RELAY_MAX_EXPIRY_SECONDS - 60);
   if (eventExpirySeconds > REGBY_RELAY_MAX_EXPIRY_SECONDS) {
     throw new Error(
       `REGBY_EVENT_EXPIRY_SECONDS (${eventExpirySeconds}) exceeds the DM relay max (${REGBY_RELAY_MAX_EXPIRY_SECONDS} = 72h)`,
