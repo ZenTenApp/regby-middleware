@@ -1,7 +1,7 @@
 /**
  * SQLite-backed code store. Maps an 8-digit code to the merchant's payment-request
  * URI, persisted so codes survive a server restart (the previous in-memory Map
- * lost every code on reboot — a restart used to make all codes unredeemable).
+ * lost every code on reboot - a restart used to make all codes unredeemable).
  *
  * Validity timestamps per row, both anchored to the merchant request's
  * `created_at` (skew-clamped by the caller):
@@ -14,7 +14,7 @@
  * any validity decision.
  *
  * **Multi-use** while valid: redeem does NOT consume the row. `node:sqlite`'s
- * synchronous API matches this single-process, single-loop server — no async
+ * synchronous API matches this single-process, single-loop server - no async
  * driver, no extra dependency.
  *
  * `RotatingCodeStore` (below) wraps this with a new file per UTC day.
@@ -35,7 +35,7 @@ export type RedeemResult =
   | { ok: true; uri: string }
   | { ok: false; reason: 'not-found' | 'expired' };
 
-/** Shared surface of `CodeStore` and its rotating wrapper — the broker's seam. */
+/** Shared surface of `CodeStore` and its rotating wrapper - the broker's seam. */
 export interface CodeStoreLike {
   mint(uri: string, startedAt: number): MintResult | null;
   redeem(code: string): RedeemResult;
@@ -132,7 +132,7 @@ export class CodeStore implements CodeStoreLike {
 
     const now = this.now();
     if (now >= row.retain_until) {
-      // Past retention but the sweep hasn't run yet — drop it and report gone.
+      // Past retention but the sweep hasn't run yet - drop it and report gone.
       this.deleteStmt.run(code);
       return { ok: false, reason: 'not-found' };
     }
@@ -176,12 +176,12 @@ export function dailyDbPath(basePath: string, epochSeconds: number): string {
 /**
  * A `CodeStore` that writes to a fresh SQLite file each UTC day, nested under
  * `YYYY/MM/regby-<date>.db`, and switches at 00:00 UTC. Old files are KEPT on
- * disk, never purged — a daily
+ * disk, never purged - a daily
  * archive. The active store is the only one read or written.
  *
  * **Current-day-only**: a code lives solely in the file of the day it was minted.
  * A code minted just before midnight becomes unreachable once the day rolls over,
- * even though its retention window hasn't lapsed — a deliberate trade (chosen over
+ * even though its retention window hasn't lapsed - a deliberate trade (chosen over
  * reading the previous day's file) for simple, self-contained daily files. The
  * switch is checked lazily on every op, and the broker's 60 s sweep timer calls
  * `sweep()`, so rotation happens within ~60 s of midnight even with no traffic.

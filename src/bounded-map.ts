@@ -1,6 +1,6 @@
 /**
  * A `Map` with a hard entry cap. When full, inserting a new key first evicts the
- * oldest-inserted one (`Map` preserves insertion order) — cheap FIFO eviction.
+ * oldest-inserted one (`Map` preserves insertion order) - cheap FIFO eviction.
  * Used wherever an untrusted, unbounded key space (peer pubkeys, event ids)
  * feeds a cache or seen-set, so a flood of distinct keys can't grow memory
  * without limit.

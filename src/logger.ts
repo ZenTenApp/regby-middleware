@@ -1,7 +1,7 @@
 /**
  * Minimal structured (JSON-lines) logger. Levels gate output; the default is
  * `info`. SECURITY: never pass a decrypted `uri` or a live `code` into an
- * info/warn/error call — those belong at `debug` only, off in production.
+ * info/warn/error call - those belong at `debug` only, off in production.
  */
 
 type Level = 'error' | 'warn' | 'info' | 'debug';

@@ -1,5 +1,5 @@
 /**
- * ReGBY wire protocol — the single source of truth for the encrypted DM shapes
+ * ReGBY wire protocol - the single source of truth for the encrypted DM shapes
  * exchanged between the app and this middleman, mirroring `utils/regby.ts` in
  * the wallet app.
  *
@@ -9,17 +9,18 @@
  *     payment-request URI (possibly multi-line / multi-option) or the bare
  *     eight-digit code. No JSON wrapper. A `defifrom://` confirmation never
  *     passes through here - see `DEFITO_PREFIX`.
- *   - the message **intent** rides a plaintext `['i', <intent>]` tag —
+ *   - the message **intent** rides a plaintext `['i', <intent>]` tag -
  *     single-letter `i` is relay-indexable, so the server subscribes
- *     `#i:['request_code','request_uri']` and pulls only inbound regby traffic.
+ *     `#i:INBOUND_INTENTS` and pulls only inbound regby traffic.
  *   - replies carry `['e', <request-event-id>]` (Nostr-native reply linkage)
- *     so the client matches a reply to the request it published — no in-band
+ *     so the client matches a reply to the request it published - no in-band
  *     correlation id needed.
  *   - there is **no `error` intent**. A failure reply reuses the success intent
- *     (`code` for a `request_code`, `uri` for a `request_uri`) and carries the
- *     reason string in `content` instead of a value. The client tells a value
- *     from an error by the content's SHAPE (8 digits / a `defito://` prefix)
- *     and whitelist-sanitises anything else — the middleman is untrusted, so a
+ *     (`regby_code` for a `request_regby_code`, `regby_content` for a
+ *     `request_regby_content`) and carries the reason string in `content`
+ *     instead of a value. The client tells a value from an error by the
+ *     content's SHAPE (8 digits / a `defito://` prefix)
+ *     and whitelist-sanitises anything else - the middleman is untrusted, so a
  *     free `error` text channel was just a hole for arbitrary text into the UI.
  *   - relay retention is bounded by NIP-40 `['expiration', unixSec]`.
  *
@@ -87,41 +88,41 @@ export const MAX_PAYLOAD_LINES = 20;
 /** Intent tag key. */
 export const INTENT_TAG = 'i';
 
-export type ReGBYIntent = 'request_code' | 'code' | 'request_uri' | 'uri';
-
-/** The two intents the middleman emits — a failure reuses the matching one. */
-export type OutboundIntent = Extract<ReGBYIntent, 'code' | 'uri'>;
+/** Inbound intents as a value list. Feeds the relay `#i` subscription filter
+ *  and `extractIntent`, so the type and the runtime check cannot drift. */
+export const INBOUND_INTENTS = ['request_regby_code', 'request_regby_content'] as const;
 
 /** The two intents the middleman accepts from clients. */
-export type InboundIntent = Extract<ReGBYIntent, 'request_code' | 'request_uri'>;
-
-/** Inbound intents as a value list — feeds the relay `#i` subscription filter. */
-export const INBOUND_INTENTS: readonly InboundIntent[] = ['request_code', 'request_uri'];
+export type InboundIntent = (typeof INBOUND_INTENTS)[number];
 
 /** The success intent that answers each inbound request (reused for errors). */
-export const REPLY_INTENT: Record<InboundMessage['intent'], OutboundIntent> = {
-  request_code: 'code',
-  request_uri: 'uri',
-};
+export const REPLY_INTENT = {
+  request_regby_code: 'regby_code',
+  request_regby_content: 'regby_content',
+} as const satisfies Record<InboundIntent, string>;
+
+/** The two intents the middleman emits; a failure reuses the matching one. */
+export type OutboundIntent = (typeof REPLY_INTENT)[InboundIntent];
 
 /** A validated inbound message: a merchant code request, or a customer redeem. */
 export type InboundMessage =
-  | { intent: 'request_code'; uri: string }
-  | { intent: 'request_uri'; code: string };
+  | { intent: 'request_regby_code'; uri: string }
+  | { intent: 'request_regby_content'; code: string };
 
 /**
  * Outcome of parsing decrypted inbound content. The three verdicts differ by
  * what they cost the SENDER, so what separates them is evidence of intent.
  *  - `ok`        → a well-formed message to dispatch.
  *  - `malicious` → decrypt succeeded (a real, targeted message) but a
- *    `request_code` carried a payload that is not `defito://`. The sender
+ *    `request_regby_code` carried a payload that is not `defito://`. The sender
  *    proved they hold the conversation key, so aiming a foreign scheme at us is
- *    deliberate → caller replies on the reused success intent (`code`,
+ *    deliberate → caller replies on the reused success intent (`regby_code`,
  *    content = reason) AND blacklists the sender for 24 h.
  *  - `malformed` → `defito://`, but the wallet would refuse it at redeem: NO
  *    rail carries the required fields in the shapes the grammar fixes, or a
  *    payload-level screen fails (hostile text, more lines than the wallet
- *    parses). Caller replies with the same reason and does NOT blacklist: this is a broken client, not an attacker, and a 24 h
+ *    parses). Caller replies with the same reason and does NOT blacklist: this
+ *    is a broken client, not an attacker, and a 24 h
  *    lockout is the wrong answer to a merchant whose POS built a bad string.
  *  - `silent`    → junk we drop without a reply (empty/oversized, malformed
  *    code shape, or an outbound intent echoed back at us).
@@ -132,21 +133,21 @@ export type ParseResult =
 
 /**
  * Read the inbound intent from an event's tags. Returns the first recognised
- * `['i', 'request_code' | 'request_uri']`, or null when absent/unknown. The two
- * outbound intents (`code`/`uri`) are NOT accepted here — an echoed-back reply
- * never enters processing.
+ * `['i', 'request_regby_code' | 'request_regby_content']`, or null when
+ * absent/unknown. The two outbound intents (`regby_code`/`regby_content`) are
+ * NOT accepted here, so an echoed-back reply never enters processing.
  */
 export function extractIntent(tags: string[][]): InboundIntent | null {
   for (const tag of tags) {
     if (tag[0] !== INTENT_TAG) continue;
-    const value = tag[1];
-    if (value === 'request_code' || value === 'request_uri') return value;
+    const match = INBOUND_INTENTS.find((intent) => intent === tag[1]);
+    if (match) return match;
   }
   return null;
 }
 
 /**
- * Validate decrypted `content` for an inbound intent. A `request_code` whose
+ * Validate decrypted `content` for an inbound intent. A `request_regby_code` whose
  * payload is not `defito://` is `malicious` (see ParseResult) so the caller can
  * blacklist the sender; one that IS `defito://` but that the wallet would
  * refuse at redeem is `malformed` and is NOT blacklisted; a malformed code
@@ -168,7 +169,7 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
   }
   if (content.length > MAX_STORED_LENGTH) return { ok: false, reason: 'silent' };
 
-  if (intent === 'request_code') {
+  if (intent === 'request_regby_code') {
     // Two questions, two punishments: "is this even ours" (a foreign scheme is
     // deliberate) then "would the wallet take it" (anything it refuses is a
     // broken client).
@@ -177,7 +178,7 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
     return { ok: true, message: { intent, uri: content } };
   }
 
-  // request_uri
+  // request_regby_content
   if (!REGBY_CODE_RE.test(trimmed)) return { ok: false, reason: 'silent' };
   return { ok: true, message: { intent, code: trimmed } };
 }

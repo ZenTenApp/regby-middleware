@@ -3,7 +3,7 @@
  * unix time it becomes due for deletion (its NIP-40 expiration). `takeDue`
  * drains the due ids so the caller can publish a NIP-09 deletion for them.
  *
- * NIP-40 expiration is advisory — many relays ignore it — so we also issue an
+ * NIP-40 expiration is advisory - many relays ignore it - so we also issue an
  * explicit NIP-09 `kind 5` delete to actively remove our own events.
  */
 export interface PendingDeletion {

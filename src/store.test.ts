@@ -14,7 +14,7 @@ function fixedClock(start = 1000): { now: () => number; tick: (s: number) => voi
   return { now: () => t, tick: (s) => (t += s) };
 }
 
-/** In-memory DB store with an injectable clock — isolated per test. */
+/** In-memory DB store with an injectable clock - isolated per test. */
 function memStore(clock = fixedClock(), max = 100): CodeStore {
   return new CodeStore(TTL, RETAIN, max, ':memory:', clock.now);
 }
@@ -60,7 +60,7 @@ test('past validity but within retention reports expired and KEEPS the row', () 
   const minted = store.mint('defito://base/0xabc', clock.now());
   assert.ok(minted);
   clock.tick(TTL); // exactly at expiry
-  // Reported expired repeatedly — the row survives for the whole retention window.
+  // Reported expired repeatedly - the row survives for the whole retention window.
   for (let i = 0; i < 3; i++) {
     assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
   }
@@ -157,7 +157,7 @@ test('codes persist across a restart (reopen the same file)', () => {
     assert.ok(minted);
     first.close();
 
-    // Fresh instance over the same file — the prior code is still redeemable.
+    // Fresh instance over the same file - the prior code is still redeemable.
     const second = new CodeStore(TTL, RETAIN, 100, path, () => now);
     assert.deepEqual(second.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
     second.close();

@@ -11,7 +11,7 @@ test('allows up to max then blocks within the window', () => {
   assert.equal(limiter.allow('k'), false);
 });
 
-test('window slides — old hits age out', () => {
+test('window slides - old hits age out', () => {
   let t = 100;
   const limiter = new RateLimiter(2, 60, () => t);
   assert.equal(limiter.allow('k'), true);

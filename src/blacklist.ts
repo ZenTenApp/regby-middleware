@@ -1,7 +1,7 @@
 /**
- * Per-pubkey temporary blacklist. A sender that submits a `request_code` whose
+ * Per-pubkey temporary blacklist. A sender that submits a `request_regby_code` whose
  * decrypted payload is not a `defito://` invoice is deliberately abusing the
- * service (they hold the conversation key — this is not random noise), so we
+ * service (they hold the conversation key - this is not random noise), so we
  * block them for a fixed window. Memory is bounded: entries are pruned on
  * access and by the periodic sweep.
  */

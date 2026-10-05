@@ -1,11 +1,11 @@
 /**
  * ReGBY broker. Wires the transport, store, and rate limiter together and
  * dispatches inbound events:
- *   request_code → mint a code, reply `i:code` (content = code, or a reason
- *                  string on failure)
- *   request_uri  → look up code, reply `i:uri` (content = uri, multi-use, or a
- *                  reason string on failure)
- * There is no `error` intent — a failure reuses the request's success intent and
+ *   request_regby_code    → mint a code, reply `i:regby_code` (content = code,
+ *                           or a reason string on failure)
+ *   request_regby_content → look up code, reply `i:regby_content` (content =
+ *                           uri, multi-use, or a reason string on failure)
+ * There is no `error` intent - a failure reuses the request's success intent and
  * puts the reason in `content`; the client distinguishes value from error by the
  * content's shape. Every reply links to the request via the `e` tag.
  */
@@ -30,7 +30,7 @@ export class ReGBYBroker {
   private readonly transport: ReGBYTransport;
   private readonly store: CodeStoreLike;
   private readonly limiter: RateLimiter;
-  // Aggregate redeem cap across every sender — a per-pubkey limit alone can't
+  // Aggregate redeem cap across every sender - a per-pubkey limit alone can't
   // stop enumeration by an attacker who rotates through free, fresh pubkeys.
   private readonly redeemLimiter: RateLimiter;
   // Per-sender not-found redeem strikes; exceeding the cap blacklists a guesser.
@@ -116,38 +116,39 @@ export class ReGBYBroker {
     try {
       plaintext = this.transport.decrypt(event.pubkey, event.content);
     } catch {
-      logger.debug('Decrypt failed — dropping', { id: event.id.slice(0, 12) });
+      logger.debug('Decrypt failed - dropping', { id: event.id.slice(0, 12) });
       return;
     }
-    // Raw decrypted inbound content (the URI or code). Debug only — sensitive.
+    // Raw decrypted inbound content (the URI or code). Debug only - sensitive.
     logger.debug('Inbound plaintext', { intent, from: event.pubkey.slice(0, 12), plaintext });
 
     const target: ReplyTarget = { recipientPubkey: event.pubkey, requestEventId: event.id };
     const parsed = parseInbound(intent, plaintext);
     if (!parsed.ok) {
       if (parsed.reason === 'silent') {
-        logger.debug('Unusable content — dropping', { id: event.id.slice(0, 12), intent });
+        logger.debug('Unusable content - dropping', { id: event.id.slice(0, 12), intent });
         return;
       }
       // Both remaining verdicts answer the sender; only `malicious` punishes.
       // A `malformed` payload was `defito://` but omitted a required
-      // field, which is a broken client — telling them is the useful response,
+      // field, which is a broken client - telling them is the useful response,
       // and a 24 h lockout would just make a POS bug look like an outage.
       if (parsed.reason === 'malicious') {
         // Aiming a foreign scheme at us after proving they hold the
         // conversation key is deliberate. Block the sender and tell them once.
         this.blacklist.block(event.pubkey);
-        logger.warn('Blacklisted sender — malicious request_code', {
+        logger.warn('Blacklisted sender - malicious request_regby_code', {
           from: event.pubkey.slice(0, 12),
         });
       } else {
-        logger.info('Rejected malformed request_code', { from: event.pubkey.slice(0, 12) });
+        logger.info('Rejected malformed request_regby_code', { from: event.pubkey.slice(0, 12) });
       }
-      // Neither verdict arises for request_uri, so the failure reuses
-      // request_code's success intent (`code`); the non-code content reads as
-      // an error. `Invalid Request` is one of the four reasons the app will
-      // surface verbatim — anything else renders as its generic fallback.
-      await this.transport.reply(target, REPLY_INTENT.request_code, 'Invalid Request');
+      // Neither verdict arises for request_regby_content, so the failure
+      // reuses request_regby_code's success intent (`regby_code`); the
+      // non-code content reads as an error. `Invalid Request` is one of the
+      // four reasons the app will surface verbatim, anything else renders as
+      // its generic fallback.
+      await this.transport.reply(target, REPLY_INTENT.request_regby_code, 'Invalid Request');
       return;
     }
 
@@ -174,25 +175,29 @@ export class ReGBYBroker {
     message: InboundMessage,
     createdAt: number,
   ): Promise<void> {
-    if (message.intent === 'request_code') {
+    if (message.intent === 'request_regby_code') {
       const minted = this.store.mint(message.uri, this.clampStart(createdAt));
       if (!minted) {
         logger.warn('Mint failed (store full / no free code)', { size: this.store.size });
-        await this.transport.reply(target, REPLY_INTENT.request_code, 'Service Busy, Try Again');
+        await this.transport.reply(
+          target,
+          REPLY_INTENT.request_regby_code,
+          'Service Busy, Try Again',
+        );
         return;
       }
       logger.info('Minted code', {
         from: target.recipientPubkey.slice(0, 12),
         expiresAt: minted.expiresAt,
       });
-      await this.transport.reply(target, REPLY_INTENT.request_code, minted.code);
+      await this.transport.reply(target, REPLY_INTENT.request_regby_code, minted.code);
       return;
     }
 
-    // request_uri (redeem — multi-use). A global ceiling bounds total guess rate
-    // regardless of how many pubkeys an attacker rotates through.
+    // request_regby_content (redeem, multi-use). A global ceiling bounds total
+    // guess rate regardless of how many pubkeys an attacker rotates through.
     if (!this.redeemLimiter.allow(GLOBAL_REDEEM_KEY)) {
-      logger.warn('Global redeem rate limit hit — dropping', {
+      logger.warn('Global redeem rate limit hit - dropping', {
         from: target.recipientPubkey.slice(0, 12),
       });
       return;
@@ -200,12 +205,12 @@ export class ReGBYBroker {
 
     const result = this.store.redeem(message.code);
     if (!result.ok) {
-      // A not-found (as opposed to expired) is a miss against the code space —
+      // A not-found (as opposed to expired) is a miss against the code space -
       // i.e. a guess. Count strikes per sender and blacklist a persistent
       // guesser; return no reply so the failure isn't an enumeration oracle.
       if (result.reason === 'not-found' && !this.redeemFails.allow(target.recipientPubkey)) {
         this.blacklist.block(target.recipientPubkey);
-        logger.warn('Blacklisted sender — repeated code guessing', {
+        logger.warn('Blacklisted sender - repeated code guessing', {
           from: target.recipientPubkey.slice(0, 12),
         });
         return;
@@ -216,12 +221,12 @@ export class ReGBYBroker {
       });
       await this.transport.reply(
         target,
-        REPLY_INTENT.request_uri,
+        REPLY_INTENT.request_regby_content,
         result.reason === 'expired' ? 'Code Expired' : 'Code Not Found',
       );
       return;
     }
     logger.info('Redeemed code', { from: target.recipientPubkey.slice(0, 12) });
-    await this.transport.reply(target, REPLY_INTENT.request_uri, result.uri);
+    await this.transport.reply(target, REPLY_INTENT.request_regby_content, result.uri);
   }
 }

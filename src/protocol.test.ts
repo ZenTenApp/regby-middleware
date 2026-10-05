@@ -12,10 +12,10 @@ import {
 
 test('extractIntent reads a known i tag', () => {
   assert.equal(
-    extractIntent([['p', 'x'], ['i', 'request_code'], ['e', 'y']]),
-    'request_code',
+    extractIntent([['p', 'x'], ['i', 'request_regby_code'], ['e', 'y']]),
+    'request_regby_code',
   );
-  assert.equal(extractIntent([['i', 'request_uri']]), 'request_uri');
+  assert.equal(extractIntent([['i', 'request_regby_content']]), 'request_regby_content');
 });
 
 test('extractIntent rejects unknown / absent', () => {
@@ -82,7 +82,7 @@ test('isValidPaymentUri: a bare scheme is an empty rail, not a foreign one', () 
   assert.equal(isValidPaymentUri('defito://'), true);
   // Nothing redeemable in it, so it is still refused - just as a broken client,
   // which is what it is.
-  assert.deepEqual(parseInbound('request_code', 'defito://'), {
+  assert.deepEqual(parseInbound('request_regby_code', 'defito://'), {
     ok: false,
     reason: 'malformed',
   });
@@ -104,23 +104,23 @@ test('isValidPaymentUri rejects a foreign scheme or empty', () => {
   assert.equal(isValidPaymentUri('   '), false);
 });
 
-test('parseInbound: request_code returns the raw uri', () => {
+test('parseInbound: request_regby_code returns the raw uri', () => {
   const uri = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`;
-  assert.deepEqual(parseInbound('request_code', uri), {
+  assert.deepEqual(parseInbound('request_regby_code', uri), {
     ok: true,
-    message: { intent: 'request_code', uri },
+    message: { intent: 'request_regby_code', uri },
   });
-  // The stored value is the plaintext verbatim — we never normalise a payload
+  // The stored value is the plaintext verbatim - we never normalise a payload
   // we hand back to a wallet that will parse it strictly.
   const mixedCase = `DeFiTo://base/0xAbC&Amount=USDT:1&OrderId=${ORDER}&NOSTR=${NPUB}`;
-  assert.deepEqual(parseInbound('request_code', mixedCase), {
+  assert.deepEqual(parseInbound('request_regby_code', mixedCase), {
     ok: true,
-    message: { intent: 'request_code', uri: mixedCase },
+    message: { intent: 'request_regby_code', uri: mixedCase },
   });
 });
 
-test('parseInbound: request_code with a non-payment payload is malicious', () => {
-  assert.deepEqual(parseInbound('request_code', 'https://evil.test'), {
+test('parseInbound: request_regby_code with a non-payment payload is malicious', () => {
+  assert.deepEqual(parseInbound('request_regby_code', 'https://evil.test'), {
     ok: false,
     reason: 'malicious',
   });
@@ -132,7 +132,11 @@ test('parseInbound: a missing required field is malformed, NOT malicious', () =>
   // broken client, and locking it out for a day makes a bug look like an
   // outage. Only aiming a foreign scheme at us earns the block.
   const malformed = (uri: string) =>
-    assert.deepEqual(parseInbound('request_code', uri), { ok: false, reason: 'malformed' }, uri);
+    assert.deepEqual(
+      parseInbound('request_regby_code', uri),
+      { ok: false, reason: 'malformed' },
+      uri,
+    );
 
   malformed(`defito://base/0xabc&amount=USDT:1&orderid=${ORDER}`); // no nostr
   malformed(`defito://base/0xabc&orderid=${ORDER}&nostr=${NPUB}`); // no amount
@@ -155,8 +159,8 @@ test('parseInbound: one broken rail does not sink the payload', () => {
   for (const broken of ['defito://', 'defito://tron/Tabc&amount=USDT:1']) {
     const uri = `${good}\n${broken}`;
     assert.deepEqual(
-      parseInbound('request_code', uri),
-      { ok: true, message: { intent: 'request_code', uri } },
+      parseInbound('request_regby_code', uri),
+      { ok: true, message: { intent: 'request_regby_code', uri } },
       uri,
     );
   }
@@ -166,8 +170,8 @@ test('parseInbound: padding is bounded even though the grammar is judged trimmed
   // The grammar bound is measured TRIMMED, to agree with the app - but we store
   // `content` verbatim, so whitespace is only free up to the storage bound.
   const good = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`;
-  assert.equal(parseInbound('request_code', `${' '.repeat(3000)}${good}`).ok, true);
-  assert.deepEqual(parseInbound('request_code', `${' '.repeat(9000)}${good}`), {
+  assert.equal(parseInbound('request_regby_code', `${' '.repeat(3000)}${good}`).ok, true);
+  assert.deepEqual(parseInbound('request_regby_code', `${' '.repeat(9000)}${good}`), {
     ok: false,
     reason: 'silent',
   });
@@ -177,10 +181,10 @@ test('parseInbound: the wallet trims before it screens, so we do too', () => {
   // A trailing BOM is a hidden character until `trim` removes it, and the app
   // trims first. Screening the untrimmed payload refused one it accepts.
   const uri = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}\uFEFF`;
-  assert.deepEqual(parseInbound('request_code', uri), {
+  assert.deepEqual(parseInbound('request_regby_code', uri), {
     ok: true,
     // Stored VERBATIM: we validate the trimmed payload and keep what was sent.
-    message: { intent: 'request_code', uri },
+    message: { intent: 'request_regby_code', uri },
   });
 });
 
@@ -190,8 +194,8 @@ test('parseInbound: nostr is read as leniently as the app reads it', () => {
   for (const key of [`nostr:${NPUB}`, `N${NPUB.slice(1)}`]) {
     const uri = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${key}`;
     assert.deepEqual(
-      parseInbound('request_code', uri),
-      { ok: true, message: { intent: 'request_code', uri } },
+      parseInbound('request_regby_code', uri),
+      { ok: true, message: { intent: 'request_regby_code', uri } },
       key,
     );
   }
@@ -200,7 +204,10 @@ test('parseInbound: nostr is read as leniently as the app reads it', () => {
 test('parseInbound: nostr must be a decodable identity key', () => {
   const malformed = (npub: string) =>
     assert.deepEqual(
-      parseInbound('request_code', `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${npub}`),
+      parseInbound(
+        'request_regby_code',
+        `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${npub}`,
+      ),
       { ok: false, reason: 'malformed' },
       npub,
     );
@@ -211,32 +218,32 @@ test('parseInbound: nostr must be a decodable identity key', () => {
   // `nprofile` carries a key too and the app accepts it, so we must as well or
   // we would refuse a payload the wallet built.
   const withNprofile = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPROFILE}`;
-  assert.deepEqual(parseInbound('request_code', withNprofile), {
+  assert.deepEqual(parseInbound('request_regby_code', withNprofile), {
     ok: true,
-    message: { intent: 'request_code', uri: withNprofile },
+    message: { intent: 'request_regby_code', uri: withNprofile },
   });
 });
 
-test('parseInbound: whitespace-only request_code is silent, not malicious', () => {
+test('parseInbound: whitespace-only request_regby_code is silent, not malicious', () => {
   // `malicious` costs the sender a 24 h blacklist. Three spaces from a buggy
   // client is noise; the empty-content guard already treats "no payload" that
   // way, and a payload that is only whitespace is the same thing.
-  assert.deepEqual(parseInbound('request_code', '   '), { ok: false, reason: 'silent' });
-  assert.deepEqual(parseInbound('request_code', '\n\n'), { ok: false, reason: 'silent' });
+  assert.deepEqual(parseInbound('request_regby_code', '   '), { ok: false, reason: 'silent' });
+  assert.deepEqual(parseInbound('request_regby_code', '\n\n'), { ok: false, reason: 'silent' });
 });
 
-test('parseInbound: request_uri accepts an 8-digit code, trims', () => {
-  assert.deepEqual(parseInbound('request_uri', ' 42891337 '), {
+test('parseInbound: request_regby_content accepts an 8-digit code, trims', () => {
+  assert.deepEqual(parseInbound('request_regby_content', ' 42891337 '), {
     ok: true,
-    message: { intent: 'request_uri', code: '42891337' },
+    message: { intent: 'request_regby_content', code: '42891337' },
   });
 });
 
-test('parseInbound: request_uri rejects bad code shapes silently', () => {
+test('parseInbound: request_regby_content rejects bad code shapes silently', () => {
   // 7 digits (short), 9 digits (long), 8 chars with a letter, empty, has a dot.
   for (const code of ['4289133', '428913377', '42a91337', '', '1234567.']) {
     assert.deepEqual(
-      parseInbound('request_uri', code),
+      parseInbound('request_regby_content', code),
       { ok: false, reason: 'silent' },
       `code ${JSON.stringify(code)} rejected`,
     );
@@ -244,16 +251,28 @@ test('parseInbound: request_uri rejects bad code shapes silently', () => {
 });
 
 test('extractIntent rejects the outbound intents echoed back at us', () => {
-  // `code`/`uri` are reply intents — the server must never process them inbound,
-  // so extractIntent (the sole inbound gate) drops them before parseInbound.
-  assert.equal(extractIntent([['i', 'code']]), null);
-  assert.equal(extractIntent([['i', 'uri']]), null);
+  // `regby_code`/`regby_content` are reply intents. The server must never
+  // process them inbound, so extractIntent (the sole inbound gate) drops them
+  // before parseInbound.
+  assert.equal(extractIntent([['i', 'regby_code']]), null);
+  assert.equal(extractIntent([['i', 'regby_content']]), null);
+});
+
+test('extractIntent rejects the pre-rename intents', () => {
+  // Renamed, not aliased: a stale client gets no reply rather than a half-
+  // understood one.
+  for (const old of ['request_code', 'request_uri', 'code', 'uri']) {
+    assert.equal(extractIntent([['i', old]]), null, old);
+  }
 });
 
 test('parseInbound: oversized content dropped silently', () => {
   // Silent regardless of intent (no blacklist on a size flood).
   assert.deepEqual(
-    parseInbound('request_code', `defito://a/b&amount=x&orderid=${ORDER}&nostr=` + 'a'.repeat(5000)),
+    parseInbound(
+      'request_regby_code',
+      `defito://a/b&amount=x&orderid=${ORDER}&nostr=` + 'a'.repeat(5000),
+    ),
     { ok: false, reason: 'silent' },
   );
 });
@@ -348,8 +367,8 @@ const LOCAL_REFUSED: readonly string[] = [
 test('parity: every payload the app parses, this server mints', () => {
   for (const payload of PARITY_ACCEPTED) {
     assert.deepEqual(
-      parseInbound('request_code', payload),
-      { ok: true, message: { intent: 'request_code', uri: payload } },
+      parseInbound('request_regby_code', payload),
+      { ok: true, message: { intent: 'request_regby_code', uri: payload } },
       payload,
     );
   }
@@ -357,7 +376,7 @@ test('parity: every payload the app parses, this server mints', () => {
 
 test('parity: every payload the app refuses, this server refuses', () => {
   for (const payload of [...PARITY_REFUSED, ...LOCAL_REFUSED]) {
-    const result = parseInbound('request_code', payload);
+    const result = parseInbound('request_regby_code', payload);
     assert.equal(result.ok, false, `should be refused: ${JSON.stringify(payload)}`);
   }
 });
@@ -367,7 +386,7 @@ test('parity: a refusal keeps the right VERDICT, not merely ok:false', () => {
   // blacklist, `malformed` is a reply - so a payload drifting between them is a
   // real regression that an `ok === false` assertion cannot see.
   const reasonOf = (payload: string) => {
-    const result = parseInbound('request_code', payload);
+    const result = parseInbound('request_regby_code', payload);
     return result.ok ? 'ok' : result.reason;
   };
   // Wrong scheme aimed at us after proving key possession: deliberate.
@@ -391,5 +410,5 @@ test('parity: a percent-encoded npub is read the same way as a plain one', () =>
   // `%6E` is `n`. The app percent-decodes parameter values, so it saw a valid
   // npub here while this server saw the raw escape and answered `malformed`.
   const encoded = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB.replace(/^n/, '%6E')}`;
-  assert.equal(parseInbound('request_code', encoded).ok, true);
+  assert.equal(parseInbound('request_regby_code', encoded).ok, true);
 });

@@ -10,5 +10,5 @@ regby.db
 *.db-wal
 *.db-shm
 
-# Scratch notes — never commit
+# Scratch notes - never commit
 regby*.txt

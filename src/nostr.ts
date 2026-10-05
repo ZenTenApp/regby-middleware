@@ -4,7 +4,7 @@
  *
  * NIP-04, not NIP-44, and deliberately: regby rides kind 4, and every client on
  * the other side of these relays opens a kind 4 with `nip04.decrypt` and
- * nothing else. One scheme per kind, in both directions — a reply this
+ * nothing else. One scheme per kind, in both directions - a reply this
  * middleman can encrypt is one the app can read.
  *
  * NIP-04 is unauthenticated (AES-256-CBC, no MAC), so unlike NIP-44 a
@@ -34,7 +34,7 @@ const DELETION_KIND = 5;
  */
 const CLIENT_TAG: string[] = ['client', 'regby-middleware'];
 
-/** Max `e` refs per deletion event — chunk larger batches across events. */
+/** Max `e` refs per deletion event - chunk larger batches across events. */
 const MAX_DELETE_REFS = 500;
 
 // nostr-tools' SimplePool needs a WebSocket implementation in Node.
@@ -43,7 +43,7 @@ useWebSocketImplementation(WebSocket);
 export interface ReplyTarget {
   /** Pubkey to encrypt + address the reply to. */
   recipientPubkey: string;
-  /** Event id of the request this reply answers — goes in the `e` tag. */
+  /** Event id of the request this reply answers - goes in the `e` tag. */
   requestEventId: string;
 }
 
@@ -61,7 +61,7 @@ export interface ReGBYTransport {
 
 /**
  * Per-relay rejection reasons from a `pool.publish` settle. A relay's OK:false
- * message, an AUTH refusal, or a socket failure all land here — without them an
+ * message, an AUTH refusal, or a socket failure all land here - without them an
  * `accepted: 0` publish says nothing about why.
  */
 function collectRejections(
@@ -92,7 +92,7 @@ export function createTransport(
   // The DM relays gate write (and may gate read) operations behind NIP-42 AUTH.
   // On a relay's `auth-required` challenge, sign its kind-22242 template with the
   // middleman key so publish/subscribe is authorised. Fires only on an actual
-  // challenge — an open relay never invokes it, so this is safe if AUTH is off.
+  // challenge - an open relay never invokes it, so this is safe if AUTH is off.
   const onauth = (evt: EventTemplate): Promise<VerifiedEvent> =>
     Promise.resolve(finalizeEvent(evt, secretKey));
 
@@ -105,7 +105,7 @@ export function createTransport(
   //   - dm1 (ORLY) CLOSEs the sub with `auth-required:`, which nostr-tools
   //     answers by authing and re-issuing the REQ internally.
   //   - dm2 (nostr-rs-relay) returns a plain EOSE with zero events. No error,
-  //     no CLOSED — so nothing tells nostr-tools to redo the REQ and the
+  //     no CLOSED - so nothing tells nostr-tools to redo the REQ and the
   //     subscription stays deaf for the life of that connection.
   // Waiting for the challenge and awaiting `relay.auth` first makes both
   // behave. `connect()` clears `challenge`/`authPromise` per connection and
@@ -171,7 +171,7 @@ export function createTransport(
         if (!isMissingChallenge(err)) throw err;
         // Still no challenge by the deadline: an open relay (AUTH never
         // offered) or one too slow. Proceed unauthenticated rather than stall
-        // the broker — a gated relay then refuses, and the caller logs it.
+        // the broker - a gated relay then refuses, and the caller logs it.
         if (Date.now() >= deadline) return;
         await new Promise((resolve) => setTimeout(resolve, AUTH_POLL_MS));
       }
@@ -214,7 +214,7 @@ export function createTransport(
 
   // No conversation-key cache under NIP-04: `nip04.encrypt`/`decrypt` take the
   // secret key and the peer pubkey and do the ECDH internally, with no API for
-  // a precomputed key. That is one ECDH per message rather than one per peer —
+  // a precomputed key. That is one ECDH per message rather than one per peer -
   // paid deliberately rather than worked around, since the alternative is
   // assembling the cipher here by hand.
 
@@ -244,7 +244,7 @@ export function createTransport(
   return {
     subscribe(onEvent) {
       // A single long-lived REQ goes deaf when a relay drops the idle
-      // connection — nostr-tools won't re-establish it. So we re-subscribe on a
+      // connection - nostr-tools won't re-establish it. So we re-subscribe on a
       // timer (which re-opens any dropped relay socket). The new REQ uses an
       // overlapping `since` so no event falls in the gap; re-delivered events
       // are filtered by the broker's seen-id set, so the overlap can't
@@ -301,13 +301,13 @@ export function createTransport(
       // Keyed by the event's author, which the pool has already verified the
       // signature of. A decrypt that succeeds says the ciphertext was written
       // by someone holding the ECDH secret; it is the signature, not this, that
-      // says who — see this module's note.
+      // says who - see this module's note.
       return nip04.decrypt(secretKey, senderPubkey, content);
     },
 
     async reply(target, intent, content) {
       // Raw outbound content before encryption (a code/URI value or an error
-      // reason — same intent either way). Debug only.
+      // reason - same intent either way). Debug only.
       logger.debug('Outbound plaintext', { intent, to: target.recipientPubkey.slice(0, 12), content });
       const ciphertext = nip04.encrypt(secretKey, target.recipientPubkey, content);
       const now = nowSeconds();

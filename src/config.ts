@@ -18,18 +18,18 @@ export interface Config {
   codeRetainSeconds: number;
   /** Base SQLite path; a per-UTC-day file (`regby-YYYY-MM-DD.db`) is derived from it. */
   dbPath: string;
-  /** NIP-40 event expiry — relay-retention buffer past code validity. */
+  /** NIP-40 event expiry - relay-retention buffer past code validity. */
   eventExpirySeconds: number;
   /** Tolerance for a merchant event's `created_at` vs server clock (seconds). */
   clockSkewSeconds: number;
   rateMax: number;
   rateWindowSeconds: number;
-  /** Global (all-sender) cap on redeem attempts per window — bounds code
+  /** Global (all-sender) cap on redeem attempts per window - bounds code
    * enumeration by an attacker who rotates through cheap, fresh pubkeys. */
   redeemRateMax: number;
   redeemRateWindowSeconds: number;
   /** Not-found redeems from one sender within the window before it's blacklisted
-   * as a code-guesser (expired redeems don't count — those are real lapsed codes). */
+   * as a code-guesser (expired redeems don't count - those are real lapsed codes). */
   redeemFailMax: number;
   storeMax: number;
   /** How long a malicious-request sender stays blacklisted (seconds). */
