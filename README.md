@@ -53,7 +53,7 @@ comes from the event signature alone, never from a successful decrypt.
 - **request_regby_code** → validate every line is a `defito://` invoice, mint a
   unique 8-digit code, store
   `code → { uri, expiresAt, retainUntil }`, reply `i:regby_code` with the requester's
-  event id in `e`. **Code validity (5 min) is anchored to the request
+  event id in `e`. **Code validity (2 min) is anchored to the request
   event's `created_at`**, not server receive-time, so the merchant POS and the
   server count down from the same origin - the merchant already knows that
   timestamp (it signed the event), so no echo is needed. `created_at` is
@@ -93,8 +93,10 @@ comes from the event signature alone, never from a successful decrypt.
   redeem, where the registry lives - and must anyway, since this server is
   untrusted and nothing it approves is a safety guarantee.
 - **request_regby_content** → look up the code. Valid → reply `i:regby_content` with the URI.
-  **Multi-use**: the code is *not* consumed - any number of customers can redeem
-  it until it expires. Lapsed but still **retained** (within 1 h of its
+  **Single-use**: the first successful redeem consumes the code and wipes its
+  URI. A code expires after 2 min or its first use, whichever comes first; the
+  60s sweep wipes the URI of lapsed codes, and day rotation wipes any left in
+  the outgoing file. Expired but still **retained** (within 1 h of its
   `created_at`) → `i:regby_content` `Code Expired`; never minted or past retention →
   `i:regby_content` `Code Not Found` (reason in `content`, not a URI).
 - **Persistence**: the code store is **SQLite** (`node:sqlite`, file derived from
@@ -172,7 +174,7 @@ assert that match itself.
 | `src/protocol.ts`   | intent/tag + raw-content validation (mirrors app) |
 | `src/config.ts`     | env loading, key decode, pubkey derivation        |
 | `src/nostr.ts`      | relay pool, NIP-04 encrypt/decrypt, publish       |
-| `src/store.ts`      | SQLite code → URI store (5-min validity, 1-h retention, multi-use) + per-UTC-day file rotation |
+| `src/store.ts`      | SQLite code → URI store (2-min validity, single-use, 1-h retention) + per-UTC-day file rotation |
 | `src/rate-limit.ts` | per-pubkey sliding window                         |
 | `src/blacklist.ts`  | 24h block list for malicious senders              |
 | `src/deletion-queue.ts` | tracks own reply ids → due NIP-09 deletions   |

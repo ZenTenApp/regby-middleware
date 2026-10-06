@@ -4,7 +4,7 @@
  *   request_regby_code    → mint a code, reply `i:regby_code` (content = code,
  *                           or a reason string on failure)
  *   request_regby_content → look up code, reply `i:regby_content` (content =
- *                           uri, multi-use, or a reason string on failure)
+ *                           uri, single-use, or a reason string on failure)
  * There is no `error` intent - a failure reuses the request's success intent and
  * puts the reason in `content`; the client distinguishes value from error by the
  * content's shape. Every reply links to the request via the `e` tag.
@@ -194,7 +194,7 @@ export class ReGBYBroker {
       return;
     }
 
-    // request_regby_content (redeem, multi-use). A global ceiling bounds total
+    // request_regby_content (redeem, single-use). A global ceiling bounds total
     // guess rate regardless of how many pubkeys an attacker rotates through.
     if (!this.redeemLimiter.allow(GLOBAL_REDEEM_KEY)) {
       logger.warn('Global redeem rate limit hit - dropping', {

@@ -5,7 +5,7 @@
  *
  * Validity timestamps per row, both anchored to the merchant request's
  * `created_at` (skew-clamped by the caller):
- *   - `expires_at`   = startedAt + ttl     → code **validity** (5 min). Past this
+ *   - `expires_at`   = startedAt + ttl     → code **validity** (2 min). Past this
  *     a redeem returns `expired`, but the row is KEPT.
  *   - `retain_until` = startedAt + retain  → row **retention** (1 h). A redeem
  *     between expiry and retention still reports `expired` (clear UX: "the code
@@ -13,9 +13,15 @@
  * Plus `created_at` = the server wall-clock at mint, an audit column not used in
  * any validity decision.
  *
- * **Multi-use** while valid: redeem does NOT consume the row. `node:sqlite`'s
- * synchronous API matches this single-process, single-loop server - no async
- * driver, no extra dependency.
+ * **Single-use**: the first successful redeem consumes the code - its `uri` is
+ * wiped and `expires_at` pulled to now, so a second redeem reports `expired`
+ * exactly like a lapsed code. The sweep also wipes the `uri` of every lapsed
+ * row, so the plaintext invoice stays in a row at most one sweep interval past
+ * validity; only the code shell stays for the retention window, and
+ * `secure_delete` zeroes the freed bytes rather than leaving them in free
+ * pages. `node:sqlite`'s synchronous API
+ * matches this single-process, single-loop server - the select-then-consume in
+ * `redeem` cannot interleave with another redeem, so no code is served twice.
  *
  * `RotatingCodeStore` (below) wraps this with a new file per UTC day.
  */
@@ -58,6 +64,8 @@ export class CodeStore implements CodeStoreLike {
   private readonly insertStmt: StatementSync;
   private readonly selectStmt: StatementSync;
   private readonly deleteStmt: StatementSync;
+  private readonly consumeStmt: StatementSync;
+  private readonly scrubStmt: StatementSync;
   private readonly sweepStmt: StatementSync;
   private readonly countStmt: StatementSync;
 
@@ -73,6 +81,8 @@ export class CodeStore implements CodeStoreLike {
     this.db = new DatabaseSync(dbPath);
     // WAL keeps reads/writes from blocking each other and survives a hard crash.
     this.db.exec('PRAGMA journal_mode = WAL');
+    // Wiped invoices are overwritten with zeros, not left readable in free pages.
+    this.db.exec('PRAGMA secure_delete = ON');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS codes (
         code         TEXT PRIMARY KEY,
@@ -90,6 +100,12 @@ export class CodeStore implements CodeStoreLike {
       'SELECT uri, expires_at, retain_until FROM codes WHERE code = ?',
     );
     this.deleteStmt = this.db.prepare('DELETE FROM codes WHERE code = ?');
+    this.consumeStmt = this.db.prepare(
+      "UPDATE codes SET uri = '', expires_at = ? WHERE code = ?",
+    );
+    this.scrubStmt = this.db.prepare(
+      "UPDATE codes SET uri = '' WHERE expires_at <= ? AND uri != ''",
+    );
     this.sweepStmt = this.db.prepare('DELETE FROM codes WHERE retain_until <= ?');
     this.countStmt = this.db.prepare('SELECT COUNT(*) AS n FROM codes');
   }
@@ -122,9 +138,9 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Redeem a code. Valid → `ok` (multi-use, row kept). Past validity but within
-   * retention → `expired` (row kept until retention lapses). Unknown or past
-   * retention → `not-found`.
+   * Redeem a code. Valid → `ok`, and the code is consumed (single-use). Used or
+   * past validity but within retention → `expired` (row kept until retention
+   * lapses). Unknown or past retention → `not-found`.
    */
   redeem(code: string): RedeemResult {
     const row = this.selectStmt.get(code) as CodeRow | undefined;
@@ -137,17 +153,32 @@ export class CodeStore implements CodeStoreLike {
       return { ok: false, reason: 'not-found' };
     }
     if (now >= row.expires_at) return { ok: false, reason: 'expired' };
+    this.consumeStmt.run(now, code);
     return { ok: true, uri: row.uri };
   }
 
-  /** Drop rows past their retention window. Called on mint and a periodic timer. */
+  /**
+   * Wipe the invoice from lapsed rows and drop rows past retention. Called on
+   * mint and a periodic timer.
+   */
   sweep(): void {
-    this.sweepStmt.run(this.now());
+    const now = this.now();
+    this.scrubStmt.run(now);
+    this.sweepStmt.run(now);
   }
 
   /** Close the database handle (call on shutdown). */
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Wipe every invoice, then close. For a file leaving service on day rotation:
+   * its codes become unreachable, and the archived file must not keep their URIs.
+   */
+  retire(): void {
+    this.scrubStmt.run(Number.MAX_SAFE_INTEGER);
+    this.close();
   }
 }
 
@@ -215,7 +246,7 @@ export class RotatingCodeStore implements CodeStoreLike {
   private rotateIfNeeded(): void {
     const day = utcDayKey(this.now());
     if (day === this.currentDay) return;
-    this.current.close();
+    this.current.retire();
     this.currentDay = day;
     this.current = this.openCurrent();
   }

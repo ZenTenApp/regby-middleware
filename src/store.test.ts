@@ -6,12 +6,35 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodeStore, RotatingCodeStore, dailyDbPath } from './store.ts';
 
-const TTL = 300; // 5-min validity
+const TTL = 120; // 2-min validity
 const RETAIN = 3600; // 1-h retention
 
 function fixedClock(start = 1000): { now: () => number; tick: (s: number) => void } {
   let t = start;
   return { now: () => t, tick: (s) => (t += s) };
+}
+
+/** Remove a SQLite file and its WAL sidecars. */
+function rmDb(path: string): void {
+  for (const suffix of ['', '-wal', '-shm']) rmSync(path + suffix, { force: true });
+}
+
+/** Run `fn` against a throwaway on-disk DB path, cleaned up afterwards. */
+function withTempDb(name: string, fn: (path: string) => void): void {
+  const path = join(tmpdir(), `regby-${name}-${process.pid}.db`);
+  try {
+    fn(path);
+  } finally {
+    rmDb(path);
+  }
+}
+
+/** Every row's uri keyed by code, read straight from the file (store closed). */
+function urisOnDisk(path: string): Map<string, string> {
+  const db = new DatabaseSync(path);
+  const rows = db.prepare('SELECT code, uri FROM codes').all() as { code: string; uri: string }[];
+  db.close();
+  return new Map(rows.map((r) => [r.code, r.uri]));
 }
 
 /** In-memory DB store with an injectable clock - isolated per test. */
@@ -42,16 +65,34 @@ test('mint rejects an already-expired anchor', () => {
   assert.equal(store.mint('defito://base/0xabc', clock.now() - TTL), null);
 });
 
-test('redeem is multi-use within validity', () => {
+test('redeem is single-use: a second redeem within validity reports expired', () => {
   const clock = fixedClock();
   const store = memStore(clock);
   const minted = store.mint('defito://base/0xabc', clock.now());
   assert.ok(minted);
-  for (let i = 0; i < 5; i++) {
-    clock.tick(30);
-    assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
-  }
-  assert.equal(store.size, 1);
+  clock.tick(30);
+  assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
+  assert.equal(store.size, 1); // shell kept for retention, so it reads expired, not a guess
+});
+
+test('sweep wipes the uri of consumed and lapsed rows, not of valid ones', () => {
+  withTempDb('scrub', (path) => {
+    const clock = fixedClock();
+    const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+    const used = store.mint('defito://used', clock.now());
+    const lapsed = store.mint('defito://lapsed', clock.now());
+    const valid = store.mint('defito://valid', clock.now() + 1);
+    assert.ok(used && lapsed && valid);
+    assert.ok(store.redeem(used.code).ok);
+    clock.tick(TTL); // `lapsed` hits expiry, `valid` has one second left
+    store.sweep();
+    store.close();
+    const uris = urisOnDisk(path);
+    assert.equal(uris.get(used.code), '');
+    assert.equal(uris.get(lapsed.code), '');
+    assert.equal(uris.get(valid.code), 'defito://valid');
+  });
 });
 
 test('past validity but within retention reports expired and KEEPS the row', () => {
@@ -61,9 +102,7 @@ test('past validity but within retention reports expired and KEEPS the row', () 
   assert.ok(minted);
   clock.tick(TTL); // exactly at expiry
   // Reported expired repeatedly - the row survives for the whole retention window.
-  for (let i = 0; i < 3; i++) {
-    assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
-  }
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
   assert.equal(store.size, 1);
 });
 
@@ -98,9 +137,8 @@ test('sweep frees capacity taken by rows past retention', () => {
 });
 
 test('mint records created_at = server now', () => {
-  const path = join(tmpdir(), `regby-created-${process.pid}.db`);
   const now = 1_700_000_000;
-  try {
+  withTempDb('created', (path) => {
     const store = new CodeStore(TTL, RETAIN, 100, path, () => now);
     const minted = store.mint('defito://base/0xabc', now - 50); // anchor before now
     assert.ok(minted);
@@ -111,9 +149,7 @@ test('mint records created_at = server now', () => {
     };
     assert.equal(row.created_at, now); // wall-clock mint, not the startedAt anchor
     db.close();
-  } finally {
-    for (const suffix of ['', '-wal', '-shm']) rmSync(path + suffix, { force: true });
-  }
+  });
 });
 
 test('dailyDbPath nests the file under YYYY/MM folders', () => {
@@ -130,7 +166,8 @@ test('RotatingCodeStore switches files at the UTC day boundary', () => {
   try {
     const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
     const minted = store.mint('defito://base/0xabc', clock.now());
-    assert.ok(minted);
+    const unused = store.mint('defito://unused', clock.now());
+    assert.ok(minted && unused);
     assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
     // Next UTC day → a fresh, empty file; yesterday's code is unreachable
     // (current-day-only, by design). The redeem is the op that triggers the
@@ -140,18 +177,17 @@ test('RotatingCodeStore switches files at the UTC day boundary', () => {
     assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
     assert.equal(store.size, 0);
     store.close();
+    // No sweep ran before the roll; retire() alone left the archive with no invoice.
+    assert.deepEqual([...urisOnDisk(day1).values()], ['', '']);
   } finally {
-    const day2 = dailyDbPath(base, clock.now());
-    for (const p of [day1, day2]) {
-      for (const suffix of ['', '-wal', '-shm']) rmSync(p + suffix, { force: true });
-    }
+    rmDb(day1);
+    rmDb(dailyDbPath(base, clock.now()));
   }
 });
 
 test('codes persist across a restart (reopen the same file)', () => {
-  const path = join(tmpdir(), `regby-store-test-${process.pid}.db`);
   const now = 1_000_000;
-  try {
+  withTempDb('restart', (path) => {
     const first = new CodeStore(TTL, RETAIN, 100, path, () => now);
     const minted = first.mint('defito://base/0xabc', now);
     assert.ok(minted);
@@ -161,7 +197,5 @@ test('codes persist across a restart (reopen the same file)', () => {
     const second = new CodeStore(TTL, RETAIN, 100, path, () => now);
     assert.deepEqual(second.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
     second.close();
-  } finally {
-    for (const suffix of ['', '-wal', '-shm']) rmSync(path + suffix, { force: true });
-  }
+  });
 });
