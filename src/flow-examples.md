@@ -143,6 +143,7 @@ Event tags: `["p", customer]`, `["e", <customer request id>]`, `["i","regby_cont
 failure) or `["i","regby_code"]` (mint failure), `["expiration", …]`.
 `content` is one of:
 - `"Code Expired"` - existed but already used or past the 2-min validity (still retained, < 1 h old). Reply `i:regby_content`.
+  - "Used" includes a redeem whose reply no relay accepted: the code is consumed before the reply is published (at-most-once), so a dropped reply burns it and the customer's retry lands here. Recovery is a re-mint at the POS; the server logs `Code consumed but its reply reached no relay`.
 - `"Code Not Found"` - never minted, or past its 1-h retention (purged). Reply `i:regby_content`.
 - `"Service Busy, Try Again"` - mint-time store overflow. Reply `i:regby_code`.
 - `"Invalid Request"` - a `request_regby_code` whose decrypted payload was not

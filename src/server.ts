@@ -175,6 +175,7 @@ export class ReGBYBroker {
     message: InboundMessage,
     createdAt: number,
   ): Promise<void> {
+    const from = target.recipientPubkey.slice(0, 12);
     if (message.intent === 'request_regby_code') {
       const minted = this.store.mint(message.uri, this.clampStart(createdAt));
       if (!minted) {
@@ -187,7 +188,7 @@ export class ReGBYBroker {
         return;
       }
       logger.info('Minted code', {
-        from: target.recipientPubkey.slice(0, 12),
+        from,
         expiresAt: minted.expiresAt,
       });
       await this.transport.reply(target, REPLY_INTENT.request_regby_code, minted.code);
@@ -198,7 +199,7 @@ export class ReGBYBroker {
     // guess rate regardless of how many pubkeys an attacker rotates through.
     if (!this.redeemLimiter.allow(GLOBAL_REDEEM_KEY)) {
       logger.warn('Global redeem rate limit hit - dropping', {
-        from: target.recipientPubkey.slice(0, 12),
+        from,
       });
       return;
     }
@@ -211,12 +212,12 @@ export class ReGBYBroker {
       if (result.reason === 'not-found' && !this.redeemFails.allow(target.recipientPubkey)) {
         this.blacklist.block(target.recipientPubkey);
         logger.warn('Blacklisted sender - repeated code guessing', {
-          from: target.recipientPubkey.slice(0, 12),
+          from,
         });
         return;
       }
       logger.info('Redeem rejected', {
-        from: target.recipientPubkey.slice(0, 12),
+        from,
         reason: result.reason,
       });
       await this.transport.reply(
@@ -226,7 +227,19 @@ export class ReGBYBroker {
       );
       return;
     }
-    logger.info('Redeemed code', { from: target.recipientPubkey.slice(0, 12) });
-    await this.transport.reply(target, REPLY_INTENT.request_regby_content, result.uri);
+    logger.info('Redeemed code', { from });
+    // Consume-before-publish is the at-most-once order, so a reply no relay
+    // took has already burnt the code: the customer's retry reads Code Expired
+    // and the merchant must re-mint. Surface it, or it looks like user error.
+    const delivered = await this.transport.reply(
+      target,
+      REPLY_INTENT.request_regby_content,
+      result.uri,
+    );
+    if (!delivered) {
+      logger.warn('Code consumed but its reply reached no relay', {
+        from,
+      });
+    }
   }
 }

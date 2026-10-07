@@ -95,8 +95,11 @@ comes from the event signature alone, never from a successful decrypt.
 - **request_regby_content** → look up the code. Valid → reply `i:regby_content` with the URI.
   **Single-use**: the first successful redeem consumes the code and wipes its
   URI. A code expires after 2 min or its first use, whichever comes first; the
-  60s sweep wipes the URI of lapsed codes, and day rotation wipes any left in
-  the outgoing file. Expired but still **retained** (within 1 h of its
+  60s sweep wipes the URI of lapsed codes and checkpoints the WAL so no copy
+  lingers there; shutdown wipes lapsed ones too, and day rotation wipes every
+  URI left in the outgoing file. Consume happens before the reply is
+  published, so a reply no relay accepted still burns the code (logged as a
+  warning); the merchant re-mints. Expired but still **retained** (within 1 h of its
   `created_at`) → `i:regby_content` `Code Expired`; never minted or past retention →
   `i:regby_content` `Code Not Found` (reason in `content`, not a URI).
 - **Persistence**: the code store is **SQLite** (`node:sqlite`, file derived from

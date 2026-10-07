@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodeStore, RotatingCodeStore, dailyDbPath } from './store.ts';
@@ -90,6 +90,51 @@ test('sweep wipes the uri of consumed and lapsed rows, not of valid ones', () =>
     store.close();
     const uris = urisOnDisk(path);
     assert.equal(uris.get(used.code), '');
+    assert.equal(uris.get(lapsed.code), '');
+    assert.equal(uris.get(valid.code), 'defito://valid');
+  });
+});
+
+test('a consumed code stays consumed when the wall clock steps backward', () => {
+  const clock = fixedClock();
+  const store = memStore(clock);
+  const minted = store.mint('defito://base/0xabc', clock.now());
+  assert.ok(minted);
+  clock.tick(60);
+  assert.ok(store.redeem(minted.code).ok);
+  clock.tick(-30); // NTP correction / VM restore lands before the consume
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
+});
+
+test('sweep leaves no consumed invoice in the db or its -wal log', () => {
+  withTempDb('wal', (path) => {
+    const clock = fixedClock();
+    const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+    const sentinel = 'defito://wal-sentinel-0xfeed';
+    const minted = store.mint(sentinel, clock.now());
+    assert.ok(minted);
+    assert.ok(store.redeem(minted.code).ok);
+    store.sweep();
+    // Store still open: the WAL is live, exactly where a pre-wipe frame hid.
+    for (const file of [path, `${path}-wal`]) {
+      if (!existsSync(file)) continue; // a removed -wal is as clean as it gets
+      const bytes = readFileSync(file).toString('latin1');
+      assert.ok(!bytes.includes(sentinel), `${file} still holds the invoice`);
+    }
+    store.close();
+  });
+});
+
+test('close wipes lapsed invoices but keeps valid ones for the restart', () => {
+  withTempDb('close', (path) => {
+    const clock = fixedClock();
+    const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+    const lapsed = store.mint('defito://lapsed', clock.now());
+    const valid = store.mint('defito://valid', clock.now() + TTL / 2);
+    assert.ok(lapsed && valid);
+    clock.tick(TTL); // `lapsed` is at expiry, `valid` has half its window left
+    store.close();
+    const uris = urisOnDisk(path);
     assert.equal(uris.get(lapsed.code), '');
     assert.equal(uris.get(valid.code), 'defito://valid');
   });

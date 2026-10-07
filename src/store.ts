@@ -16,12 +16,14 @@
  * **Single-use**: the first successful redeem consumes the code - its `uri` is
  * wiped and `expires_at` pulled to now, so a second redeem reports `expired`
  * exactly like a lapsed code. The sweep also wipes the `uri` of every lapsed
- * row, so the plaintext invoice stays in a row at most one sweep interval past
- * validity; only the code shell stays for the retention window, and
- * `secure_delete` zeroes the freed bytes rather than leaving them in free
- * pages. `node:sqlite`'s synchronous API
- * matches this single-process, single-loop server - the select-then-consume in
- * `redeem` cannot interleave with another redeem, so no code is served twice.
+ * row and checkpoints the WAL, so the plaintext invoice stays on disk at most
+ * one sweep interval past validity or use: `secure_delete` zeroes the bytes in
+ * the main file, and the TRUNCATE checkpoint drops the pre-wipe page images
+ * the `-wal` log would otherwise keep. Only the code shell stays for the
+ * retention window. The consume is a compare-and-set on the row itself, so a
+ * code is served at most once even if the wall clock steps backward.
+ * `node:sqlite`'s synchronous API matches this single-process, single-loop
+ * server - no async driver, no extra dependency.
  *
  * `RotatingCodeStore` (below) wraps this with a new file per UTC day.
  */
@@ -100,8 +102,10 @@ export class CodeStore implements CodeStoreLike {
       'SELECT uri, expires_at, retain_until FROM codes WHERE code = ?',
     );
     this.deleteStmt = this.db.prepare('DELETE FROM codes WHERE code = ?');
+    // Guarded on the row, not on the caller's earlier read: only an unused,
+    // unexpired row flips, so `changes` alone is the redeem verdict.
     this.consumeStmt = this.db.prepare(
-      "UPDATE codes SET uri = '', expires_at = ? WHERE code = ?",
+      "UPDATE codes SET uri = '', expires_at = ?1 WHERE code = ?2 AND uri != '' AND expires_at > ?1",
     );
     this.scrubStmt = this.db.prepare(
       "UPDATE codes SET uri = '' WHERE expires_at <= ? AND uri != ''",
@@ -120,7 +124,7 @@ export class CodeStore implements CodeStoreLike {
    * already past validity (all "try again").
    */
   mint(uri: string, startedAt: number): MintResult | null {
-    this.sweep();
+    this.purge();
     if (this.size >= this.maxEntries) return null;
 
     const createdAt = this.now(); // wall-clock mint time (audit column)
@@ -152,23 +156,35 @@ export class CodeStore implements CodeStoreLike {
       this.deleteStmt.run(code);
       return { ok: false, reason: 'not-found' };
     }
-    if (now >= row.expires_at) return { ok: false, reason: 'expired' };
-    this.consumeStmt.run(now, code);
-    return { ok: true, uri: row.uri };
+    if (Number(this.consumeStmt.run(now, code).changes) === 1) {
+      return { ok: true, uri: row.uri };
+    }
+    return { ok: false, reason: 'expired' };
   }
 
-  /**
-   * Wipe the invoice from lapsed rows and drop rows past retention. Called on
-   * mint and a periodic timer.
-   */
-  sweep(): void {
+  /** Wipe the invoice from lapsed rows and drop rows past retention. */
+  private purge(): void {
     const now = this.now();
     this.scrubStmt.run(now);
     this.sweepStmt.run(now);
   }
 
-  /** Close the database handle (call on shutdown). */
+  /**
+   * Periodic hygiene: purge, then checkpoint so wiped invoices leave the `-wal`
+   * log too. Kept off the mint path - one fsync per sweep tick, not per mint.
+   */
+  sweep(): void {
+    this.purge();
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  }
+
+  /**
+   * Purge, then close (call on shutdown). Lapsed invoices are wiped so a
+   * decommissioned server's last file holds none; valid codes are untouched
+   * and survive the restart. Closing the last connection checkpoints the WAL.
+   */
   close(): void {
+    this.purge();
     this.db.close();
   }
 
@@ -178,7 +194,7 @@ export class CodeStore implements CodeStoreLike {
    */
   retire(): void {
     this.scrubStmt.run(Number.MAX_SAFE_INTEGER);
-    this.close();
+    this.db.close();
   }
 }
 
