@@ -19,7 +19,7 @@ named in the invoice it answers and never passes through this broker.
 - Replies link to the request via `["e", <request-event-id>]` (the client
   matches a reply to the request it published - no in-band id).
 - `["expiration", <unix>]` (NIP-40) = `created_at + 1 h` on every event - a
-  relay-retention / maintenance buffer only. **Code validity is 5 min**, and is
+  relay-retention / maintenance buffer only. **Code validity is 2 min, single-use**, and is
   anchored to the merchant request event's `created_at` (not server
   receive-time), so the POS and server count down from the same instant. The
   merchant signed that event, so it already knows the origin - no timestamp is
@@ -48,7 +48,7 @@ Event on relay:
   "sig": "…"
 }
 ```
-Server: read `i:request_regby_code` → decrypt → validate every line is a `defito://` invoice → `store.mint(uri, clampToSkew(created_at))` → 8-digit code (SQLite row), valid 5 min from the merchant's `created_at`, retained 1 h. Anything else → `i:regby_code` with `Invalid Request` (a reason, not a code) + 24h blacklist (see error variant). A `defito://` payload the wallet would refuse at redeem gets the same reply WITHOUT the blacklist: a broken client is not an attacker. That covers a missing `<networks>/<recipients>`, `amount=`, `orderid=` or decodable `nostr=<npub>`, a broken `amount=` shape (`USDT:`, `:5`), hidden/bidi/markup characters anywhere in the payload, and more than 20 lines - each one mirroring a screen the wallet runs, because a code that mints here and dies at redeem leaves the merchant nothing to act on. The payload is judged TRIMMED, like the wallet judges it, and only ONE line has to be redeemable: the wallet drops a rail it cannot parse and pays from the rest, so an empty or half-built rail beside a good one still mints.
+Server: read `i:request_regby_code` → decrypt → validate every line is a `defito://` invoice → `store.mint(uri, clampToSkew(created_at))` → 8-digit code (SQLite row), valid 2 min from the merchant's `created_at` (or until first redeem), retained 1 h. Anything else → `i:regby_code` with `Invalid Request` (a reason, not a code) + 24h blacklist (see error variant). A `defito://` payload the wallet would refuse at redeem gets the same reply WITHOUT the blacklist: a broken client is not an attacker. That covers a missing `<networks>/<recipients>`, `amount=`, `orderid=` or decodable `nostr=<npub>`, a broken `amount=` shape (`USDT:`, `:5`), hidden/bidi/markup characters anywhere in the payload, and more than 20 lines - each one mirroring a screen the wallet runs, because a code that mints here and dies at redeem leaves the merchant nothing to act on. The payload is judged TRIMMED, like the wallet judges it, and only ONE line has to be redeemable: the wallet drops a rail it cannot parse and pays from the rest, so an empty or half-built rail beside a good one still mints.
 
 Past that the server validates nothing - networks, coins, address formats and amount values are the wallet's business, and it holds plaintext it never needed to understand. `orderid` is likewise opaque: we check it is PRESENT and never look at its contents, so the wallet is free to change how it mints one.
 
@@ -78,8 +78,8 @@ Merchant matches by `["e", <its request id>]`, decrypts → shows `42891337`.
 
 ## Hop 3 - customer → middleman (`i: request_regby_content`)
 
-Up to *any* number of customers can redeem the same code within the 5-min
-window - each sends their own event. Decrypted `content`:
+Only the first customer to redeem the code within the 2-min window gets the
+URI - the code is consumed on use. Decrypted `content`:
 ```
 42891337
 ```
@@ -99,7 +99,7 @@ Event:
   "sig": "…"
 }
 ```
-Server: `store.redeem("42891337")` → found + unexpired → returns URI. **Not consumed** - the code stays valid for other customers until it expires.
+Server: `store.redeem("42891337")` → found + unexpired → returns URI and **consumes** the code (URI wiped, `expires_at` pulled to now). A second redeem gets `Code Expired`.
 
 ## Hop 4 - middleman → customer (`i: regby_content`)
 
@@ -142,7 +142,8 @@ Code Not Found
 Event tags: `["p", customer]`, `["e", <customer request id>]`, `["i","regby_content"]` (redeem
 failure) or `["i","regby_code"]` (mint failure), `["expiration", …]`.
 `content` is one of:
-- `"Code Expired"` - existed but past the 5-min validity (still retained, < 1 h old). Reply `i:regby_content`.
+- `"Code Expired"` - existed but already used or past the 2-min validity (still retained, < 1 h old). Reply `i:regby_content`.
+  - "Used" includes a redeem whose reply no relay accepted: the code is consumed before the reply is published (at-most-once), so a dropped reply burns it and the customer's retry lands here. Recovery is a re-mint at the POS; the server logs `Code consumed but its reply reached no relay`.
 - `"Code Not Found"` - never minted, or past its 1-h retention (purged). Reply `i:regby_content`.
 - `"Service Busy, Try Again"` - mint-time store overflow. Reply `i:regby_code`.
 - `"Invalid Request"` - a `request_regby_code` whose decrypted payload was not
@@ -155,7 +156,7 @@ failure) or `["i","regby_code"]` (mint failure), `["expiration", …]`.
 - Intent is the `["i",<intent>]` tag (signed → authenticated); no `type` field, no `requestId`.
 - Correlation is the `["e", <request-event-id>]` reply tag.
 - Server subscription: `{ kinds:[4], "#p":[MID], "#i":["request_regby_code","request_regby_content"] }`.
-- Code validity = 5 min, anchored to the merchant request's `created_at` (skew-clamped). Multi-use, unlimited redemptions within the window. Lapsed codes stay redeemable-as-`Code Expired` for 1 h, then purge to `Code Not Found`.
+- Code validity = 2 min, anchored to the merchant request's `created_at` (skew-clamped). Single-use: the first redeem consumes it. Used or lapsed codes answer `Code Expired` for 1 h (URI already wiped), then purge to `Code Not Found`.
 - Relay retention = NIP-40 `expiration` = `created_at + 1 h` on every event (maintenance buffer, unrelated to code validity).
 - **Active cleanup**: after a reply's 1-hour expiration, the middleman publishes a NIP-09 `kind 5`
   deletion referencing its own reply event ids (batched), since NIP-40 is advisory and not all relays honor

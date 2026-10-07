@@ -50,8 +50,12 @@ export interface ReplyTarget {
 export interface ReGBYTransport {
   /** Subscribe to inbound regby events addressed to the middleman. */
   subscribe(onEvent: (event: Event) => void): { close: () => void };
-  /** Encrypt + sign + publish a raw-content reply of `intent` to a target. */
-  reply(target: ReplyTarget, intent: OutboundIntent, content: string): Promise<void>;
+  /**
+   * Encrypt + sign + publish a raw-content reply of `intent` to a target.
+   * Resolves true when at least one relay accepted it; relay failures resolve
+   * false rather than reject.
+   */
+  reply(target: ReplyTarget, intent: OutboundIntent, content: string): Promise<boolean>;
   /** Decrypt an inbound event's content with the sender's conversation key. */
   decrypt(senderPubkey: string, content: string): string;
   /** Publish NIP-09 deletions for our reply events whose expiry has passed. */
@@ -349,6 +353,7 @@ export function createTransport(
         // (kind/size/expiry/AUTH/write policy) or a dead socket dropped it.
         logger.warn('Reply accepted by no relay', { intent, rejections });
       }
+      return accepted > 0;
     },
 
     async purgeExpired() {
