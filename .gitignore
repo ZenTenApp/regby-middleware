@@ -6,6 +6,7 @@ dist/
 .DS_Store
 # SQLite code store (+ WAL/SHM sidecars)
 regby.db
+/data/
 *.db
 *.db-wal
 *.db-shm

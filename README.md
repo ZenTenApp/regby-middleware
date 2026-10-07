@@ -172,6 +172,48 @@ The boot log prints the derived public key - copy it into the app's
 `REGBY_MIDDLEMAN_PUBKEY` constant. Set `REGBY_EXPECTED_PUBKEY` to have the server
 assert that match itself.
 
+### Docker
+
+```bash
+docker compose up -d --build
+docker compose logs regby | grep dbPath   # must print /data/regby.db
+```
+
+The code store lives on the host in `./data` (override with `REGBY_DATA_DIR`
+in `.env`), bind-mounted at `/data`, as `YYYY/MM/regby-YYYY-MM-DD.db`. It
+survives rebuilds, container recreation, `docker compose down -v` and
+`docker volume prune`. Compose pins `REGBY_DB_PATH=/data/regby.db`, so `.env`
+cannot move the store off the mount.
+
+The container runs as root, so the files are root-owned: run the commands
+below as root (or with `sudo`).
+
+**Backups**: past days' files are closed and safe to copy as-is. Today's file
+is live (WAL mode); copy it with
+`sqlite3 data/YYYY/MM/regby-<today>.db ".backup today.db"`, not `cp`.
+
+**Migrating from the old named volume** (`regby-data`): stop the service, copy
+the volume into the new folder, then start the new setup. The volume name
+carries the compose project name (the repo folder by default), so confirm it
+first.
+
+```bash
+docker volume ls | grep regby-data        # e.g. regby-middleware_regby-data
+docker stop regby                         # closes today's db cleanly
+mkdir -p data
+cp -a "$(docker volume inspect -f '{{.Mountpoint}}' regby-middleware_regby-data)/." data/
+find data -name 'regby-*.db' | wc -l      # one file per day served so far
+docker compose up -d --build
+```
+
+Once the new setup has run cleanly for a few days, drop the old volume:
+`docker volume rm regby-middleware_regby-data`.
+
+If the old deploy had `REGBY_DB_PATH=regby.db` in `.env`, the files were in the
+container under `/app/YYYY/...` instead. Copy out each year folder with
+`docker cp regby:/app/YYYY ./data/` while the old container still exists, i.e.
+before `docker compose up` recreates it.
+
 ## Layout
 
 | file                | role                                              |
