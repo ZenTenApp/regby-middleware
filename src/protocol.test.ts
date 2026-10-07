@@ -31,6 +31,14 @@ const PUBKEY_HEX = 'ca89cb11f1c75d5b6622268ff43d2288ea8b2cb5b9aa996ff9ff704fc904
 const NPROFILE = nprofileEncode({ pubkey: PUBKEY_HEX });
 // 32 hex chars, no dashes - the shape the app mints. Opaque to this server.
 const ORDER = '9f2c14ab7e5d4083b6a1cc90de3f7721';
+// Unix seconds. Only the SHAPE is checked here, never whether it has passed
+// (that is the wallet's call), so the value need not stay in the future.
+const VALID_UNTIL = 1795219200;
+// Every required field after `amount`. Shared spelling with the app's parity
+// file (see the cross-repo parity block below).
+const REQUIRED = `&order_id=${ORDER}&valid_until=${VALID_UNTIL}&nostr=${NPUB}`;
+// A minimal payload the wallet redeems; tests vary it one field at a time.
+const GOOD = `defito://base/0xabc&amount=USDT:1${REQUIRED}`;
 
 test('the shared constants are the values the app builds against', () => {
   // Lockstep with the app is otherwise carried by prose alone, and a silent
@@ -105,14 +113,14 @@ test('isValidPaymentUri rejects a foreign scheme or empty', () => {
 });
 
 test('parseInbound: request_regby_code returns the raw uri', () => {
-  const uri = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`;
+  const uri = GOOD;
   assert.deepEqual(parseInbound('request_regby_code', uri), {
     ok: true,
     message: { intent: 'request_regby_code', uri },
   });
   // The stored value is the plaintext verbatim - we never normalise a payload
   // we hand back to a wallet that will parse it strictly.
-  const mixedCase = `DeFiTo://base/0xAbC&Amount=USDT:1&OrderId=${ORDER}&NOSTR=${NPUB}`;
+  const mixedCase = `DeFiTo://base/0xAbC&Amount=USDT:1&Order_Id=${ORDER}&Valid_Until=${VALID_UNTIL}&NOSTR=${NPUB}`;
   assert.deepEqual(parseInbound('request_regby_code', mixedCase), {
     ok: true,
     message: { intent: 'request_regby_code', uri: mixedCase },
@@ -138,14 +146,17 @@ test('parseInbound: a missing required field is malformed, NOT malicious', () =>
       uri,
     );
 
-  malformed(`defito://base/0xabc&amount=USDT:1&orderid=${ORDER}`); // no nostr
-  malformed(`defito://base/0xabc&orderid=${ORDER}&nostr=${NPUB}`); // no amount
+  malformed(`defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=${VALID_UNTIL}`); // no nostr
+  malformed(`defito://base/0xabc${REQUIRED}`); // no amount
   // Without an order id the confirmation that settles this invoice has nothing
   // to echo, so the merchant could never match the payment to the order.
-  malformed(`defito://base/0xabc&amount=USDT:1&nostr=${NPUB}`);
-  malformed(`defito://base&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`); // no recipient
-  malformed(`defito://base/&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`); // empty recipient
-  malformed(`defito:///0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`); // empty network
+  malformed(`defito://base/0xabc&amount=USDT:1&valid_until=${VALID_UNTIL}&nostr=${NPUB}`);
+  // Without a valid_until the wallet drops the line. Its SHAPE cases live in
+  // the parity list below.
+  malformed(`defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&nostr=${NPUB}`);
+  malformed(`defito://base&amount=USDT:1${REQUIRED}`); // no recipient
+  malformed(`defito://base/&amount=USDT:1${REQUIRED}`); // empty recipient
+  malformed(`defito:///0xabc&amount=USDT:1${REQUIRED}`); // empty network
   malformed(`defito://base/0xabc`); // no params at all
   // EVERY rail has to be unredeemable, not just one: see the rails test below.
   malformed(`defito://base/0xabc\ndefito://tron/Tabc&amount=USDT:1`);
@@ -155,7 +166,7 @@ test('parseInbound: one broken rail does not sink the payload', () => {
   // Measured against the app: `parseDirectPay` drops a rail it cannot parse and
   // pays from the rest, so refusing here cost the merchant a code the customer
   // could have paid, over a rail the wallet was never going to show.
-  const good = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`;
+  const good = GOOD;
   for (const broken of ['defito://', 'defito://tron/Tabc&amount=USDT:1']) {
     const uri = `${good}\n${broken}`;
     assert.deepEqual(
@@ -169,7 +180,7 @@ test('parseInbound: one broken rail does not sink the payload', () => {
 test('parseInbound: padding is bounded even though the grammar is judged trimmed', () => {
   // The grammar bound is measured TRIMMED, to agree with the app - but we store
   // `content` verbatim, so whitespace is only free up to the storage bound.
-  const good = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`;
+  const good = GOOD;
   assert.equal(parseInbound('request_regby_code', `${' '.repeat(3000)}${good}`).ok, true);
   assert.deepEqual(parseInbound('request_regby_code', `${' '.repeat(9000)}${good}`), {
     ok: false,
@@ -180,7 +191,7 @@ test('parseInbound: padding is bounded even though the grammar is judged trimmed
 test('parseInbound: the wallet trims before it screens, so we do too', () => {
   // A trailing BOM is a hidden character until `trim` removes it, and the app
   // trims first. Screening the untrimmed payload refused one it accepts.
-  const uri = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}\uFEFF`;
+  const uri = `${GOOD}\uFEFF`;
   assert.deepEqual(parseInbound('request_regby_code', uri), {
     ok: true,
     // Stored VERBATIM: we validate the trimmed payload and keep what was sent.
@@ -192,7 +203,7 @@ test('parseInbound: nostr is read as leniently as the app reads it', () => {
   // `parseNostrIdentifier` strips a `nostr:` prefix and lowercases before the
   // bech32 decode, so both of these build payloads the wallet pays.
   for (const key of [`nostr:${NPUB}`, `N${NPUB.slice(1)}`]) {
-    const uri = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${key}`;
+    const uri = `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=${VALID_UNTIL}&nostr=${key}`;
     assert.deepEqual(
       parseInbound('request_regby_code', uri),
       { ok: true, message: { intent: 'request_regby_code', uri } },
@@ -206,7 +217,7 @@ test('parseInbound: nostr must be a decodable identity key', () => {
     assert.deepEqual(
       parseInbound(
         'request_regby_code',
-        `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${npub}`,
+        `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=${VALID_UNTIL}&nostr=${npub}`,
       ),
       { ok: false, reason: 'malformed' },
       npub,
@@ -217,7 +228,7 @@ test('parseInbound: nostr must be a decodable identity key', () => {
   malformed(PUBKEY_HEX); // bare hex has a tx hash's shape
   // `nprofile` carries a key too and the app accepts it, so we must as well or
   // we would refuse a payload the wallet built.
-  const withNprofile = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPROFILE}`;
+  const withNprofile = `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=${VALID_UNTIL}&nostr=${NPROFILE}`;
   assert.deepEqual(parseInbound('request_regby_code', withNprofile), {
     ok: true,
     message: { intent: 'request_regby_code', uri: withNprofile },
@@ -271,7 +282,7 @@ test('parseInbound: oversized content dropped silently', () => {
   assert.deepEqual(
     parseInbound(
       'request_regby_code',
-      `defito://a/b&amount=x&orderid=${ORDER}&nostr=` + 'a'.repeat(5000),
+      `defito://a/b&amount=x&order_id=${ORDER}&valid_until=${VALID_UNTIL}&nostr=` + 'a'.repeat(5000),
     ),
     { ok: false, reason: 'silent' },
   );
@@ -280,8 +291,8 @@ test('parseInbound: oversized content dropped silently', () => {
 // ---------------------------------------------------------------------------
 // Cross-repo parity. The two lists below hold the same payloads in the same
 // order as the app's `__tests__/protocol-parity.test.ts`, with the same
-// `REQUIRED` spelling, so the two files read side by side and a payload added
-// to one is visibly missing from the other. Change one list, change the other.
+// `REQUIRED` spelling (declared at the top here), so the two files read side
+// by side and a payload added to one is visibly missing from the other. Change one list, change the other.
 // The ONE textual difference is deliberate: where the app writes a raw U+2028
 // into its source, this file writes the `\u2028` escape, because an invisible
 // line separator in a source file is a trap for the next editor. Cases only
@@ -297,14 +308,12 @@ test('parseInbound: oversized content dropped silently', () => {
 // amount shape, hostile text outside the lifted fields, and the line cap.
 // ---------------------------------------------------------------------------
 
-const REQUIRED = `&orderid=${ORDER}&nostr=${NPUB}`;
-
 const PARITY_ACCEPTED: readonly string[] = [
   `defito://base/0xabc&amount=USDT:1${REQUIRED}`,
   `defito://base/0xabc&amount=USDT${REQUIRED}`, // amount value optional
   `defito://avalanche,base,tron/0xabc,TJRxyz&amount=USDT,USDC:123.45${REQUIRED}`,
   `defito://base/0xabc&amount=USDT:1${REQUIRED}\ndefito://tron/TJRxyz&amount=USDT:1${REQUIRED}`,
-  `DeFiTo://base/0xAbC&Amount=USDT:1&OrderId=${ORDER}&NOSTR=${NPUB}`, // key case
+  `DeFiTo://base/0xAbC&Amount=USDT:1&Order_Id=${ORDER}&Valid_Until=${VALID_UNTIL}&NOSTR=${NPUB}`, // key case
   // The accepted side of the line cap. `21 refuses` alone would still pass if
   // a regression tightened MAX_PAYLOAD_LINES to 5; this is the half that costs
   // a merchant a code they can mint and nobody can redeem.
@@ -312,9 +321,17 @@ const PARITY_ACCEPTED: readonly string[] = [
 ];
 
 const PARITY_REFUSED: readonly string[] = [
-  `defito://base/0xabc&amount=USDT:1&nostr=${NPUB}`, // no orderid
-  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}`, // no nostr
-  `defito://base/0xabc&orderid=${ORDER}&nostr=${NPUB}`, // no amount
+  `defito://base/0xabc&amount=USDT:1&valid_until=${VALID_UNTIL}&nostr=${NPUB}`, // no order_id
+  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&valid_until=${VALID_UNTIL}&nostr=${NPUB}`, // retired spelling
+  `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&nostr=${NPUB}`, // no valid_until
+  // --- valid_until SHAPE: unix seconds as a plain positive integer.
+  `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=0&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=1e9&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=-60&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=tomorrow&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=${VALID_UNTIL}`, // no nostr
+  `defito://base/0xabc&order_id=${ORDER}&valid_until=${VALID_UNTIL}&nostr=${NPUB}`, // no amount
   `defito://base&amount=USDT:1${REQUIRED}`, // no recipient
   `defito://${REQUIRED}`, // no path at all
   'defito://', // scheme only
@@ -324,11 +341,11 @@ const PARITY_REFUSED: readonly string[] = [
   `defito://base/0xabc&amount=USDT:1${REQUIRED}\rhttps://evil.test`, // lone CR
   `defito://base/0xabc&amount=USDT:1${REQUIRED}\u2028https://evil.test`,
   `defito://base/0xabc&amount=&amount=USDT:5${REQUIRED}`, // first key wins, empty
-  `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=${VALID_UNTIL}&nostr=&nostr=${NPUB}`,
   // A hostile value in a presence-checked field. The app drops it in
   // `parseUriParams`; the middleware screens it in `param` for the same reason.
-  `defito://base/0xabc&amount=USDT:1&orderid=%3Cscript%3E&nostr=${NPUB}`,
-  `defito://base/0xabc&amount=USDT:1&orderid=%E2%80%AE${ORDER}&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&order_id=%3Cscript%3E&valid_until=${VALID_UNTIL}&nostr=${NPUB}`,
+  `defito://base/0xabc&amount=USDT:1&order_id=%E2%80%AE${ORDER}&valid_until=${VALID_UNTIL}&nostr=${NPUB}`,
   `defito://base/0xabc&amount=USDT:1${REQUIRED}\nhttps://evil.test`,
   // --- amount SHAPE. The coin list is required and a trailing colon is a
   // truncated value, not an amount-less request. Both sides refuse all three.
@@ -391,17 +408,17 @@ test('parity: a refusal keeps the right VERDICT, not merely ok:false', () => {
   };
   // Wrong scheme aimed at us after proving key possession: deliberate.
   assert.equal(reasonOf('https://evil.test'), 'malicious');
-  assert.equal(reasonOf(`defipay://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`), 'malicious');
-  assert.equal(reasonOf(`defifrom://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`), 'malicious');
+  assert.equal(reasonOf(`defipay://base/0xabc&amount=USDT:1${REQUIRED}`), 'malicious');
+  assert.equal(reasonOf(`defifrom://base/0xabc&amount=USDT:1${REQUIRED}`), 'malicious');
   // Right scheme, field missing: a broken client, and no blacklist.
-  assert.equal(reasonOf(`defito://base/0xabc&amount=USDT:1&nostr=${NPUB}`), 'malformed');
-  assert.equal(reasonOf(`defito://base/0xabc&orderid=${ORDER}&nostr=${NPUB}`), 'malformed');
-  assert.equal(reasonOf(`defito://base&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}`), 'malformed');
+  assert.equal(reasonOf(`defito://base/0xabc&amount=USDT:1&valid_until=${VALID_UNTIL}&nostr=${NPUB}`), 'malformed');
+  assert.equal(reasonOf(`defito://base/0xabc${REQUIRED}`), 'malformed');
+  assert.equal(reasonOf(`defito://base&amount=USDT:1${REQUIRED}`), 'malformed');
   // Right scheme, wallet-refusing payload: also a broken client, not a foreign
   // scheme aimed at us, so it must not cost the sender a day of lockout.
-  assert.equal(reasonOf(`defito://base/0xabc&amount=USDT:&orderid=${ORDER}&nostr=${NPUB}`), 'malformed');
+  assert.equal(reasonOf(`defito://base/0xabc&amount=USDT:${REQUIRED}`), 'malformed');
   assert.equal(
-    reasonOf(`defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB}&message=<script>`),
+    reasonOf(`defito://base/0xabc&amount=USDT:1${REQUIRED}&message=<script>`),
     'malformed',
   );
 });
@@ -409,6 +426,18 @@ test('parity: a refusal keeps the right VERDICT, not merely ok:false', () => {
 test('parity: a percent-encoded npub is read the same way as a plain one', () => {
   // `%6E` is `n`. The app percent-decodes parameter values, so it saw a valid
   // npub here while this server saw the raw escape and answered `malformed`.
-  const encoded = `defito://base/0xabc&amount=USDT:1&orderid=${ORDER}&nostr=${NPUB.replace(/^n/, '%6E')}`;
+  const encoded = `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=${VALID_UNTIL}&nostr=${NPUB.replace(/^n/, '%6E')}`;
   assert.equal(parseInbound('request_regby_code', encoded).ok, true);
+});
+
+test('a percent-encoded valid_until is read decoded, like every other value', () => {
+  // `%31` is `1`. `param` decodes before the shape check, as the app does, so
+  // an escaped digit passes and an escaped sign (`%2B` → `+`) still refuses.
+  const withExpiry = (value: string): string =>
+    `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=${value}&nostr=${NPUB}`;
+  assert.equal(parseInbound('request_regby_code', withExpiry(`%31${VALID_UNTIL}`)).ok, true);
+  assert.deepEqual(parseInbound('request_regby_code', withExpiry(`%2B${VALID_UNTIL}`)), {
+    ok: false,
+    reason: 'malformed',
+  });
 });

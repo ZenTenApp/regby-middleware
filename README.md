@@ -68,8 +68,10 @@ comes from the event signature alone, never from a successful decrypt.
   would make a POS bug look like an outage. Undecryptable noise and malformed
   codes are still dropped silently.
 - What earns that softer refusal is exactly what the wallet screens, mirrored
-  field for field: a missing `<networks>/<recipients>`, `amount=`, `orderid=`
-  or decodable `nostr=<npub>`; an `amount=` whose shape is broken (`USDT:` is a
+  field for field: a missing `<networks>/<recipients>`, `amount=`, `order_id=`
+  or decodable `nostr=<npub>`; a missing or malformed `valid_until=` (unix
+  seconds as a plain positive integer - whether it has PASSED is the wallet's
+  call, on its own clock); an `amount=` whose shape is broken (`USDT:` is a
   truncated amount, `:5` names no coin); hidden, bidi or markup characters
   anywhere in the payload, read both as written and as the wallet will decode
   them; and more than 20 lines, past which the wallet drops the surplus and
@@ -88,7 +90,7 @@ comes from the event signature alone, never from a successful decrypt.
 - Nothing past that is validated here, on purpose. Chain names, coin symbols,
   address formats and amount values come from a stablecoin registry that updates
   without a server deploy, so a list frozen here would start refusing valid
-  payloads the day a chain is added. `orderid` is likewise opaque: we check it
+  payloads the day a chain is added. `order_id` is likewise opaque: we check it
   is present, never what it contains. The wallet re-validates all of it at
   redeem, where the registry lives - and must anyway, since this server is
   untrusted and nothing it approves is a safety guarantee.
