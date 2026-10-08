@@ -99,10 +99,18 @@ export function loadConfig(): Config {
     );
   }
 
-  const codeTtlSeconds = intEnv('REGBY_CODE_TTL_SECONDS', 120);
+  const codeTtlSeconds = intEnv('REGBY_CODE_TTL_SECONDS', 60);
   const codeRetainSeconds = intEnv('REGBY_CODE_RETAIN_SECONDS', 3600);
   if (codeRetainSeconds < codeTtlSeconds) {
     throw new Error('REGBY_CODE_RETAIN_SECONDS must be >= REGBY_CODE_TTL_SECONDS');
+  }
+  // A stale stamp is clamped to `now - skew`, so a skew at or past the TTL
+  // anchors the code at or before its own expiry: mint refuses it and the
+  // merchant is told "Service Busy" on every retry, since the next request is
+  // just as stale.
+  const clockSkewSeconds = intEnv('REGBY_CLOCK_SKEW_SECONDS', 30);
+  if (clockSkewSeconds >= codeTtlSeconds) {
+    throw new Error('REGBY_CLOCK_SKEW_SECONDS must be < REGBY_CODE_TTL_SECONDS');
   }
 
   // Default is the relays' full 72h window less a one-minute clock-skew margin:
@@ -123,7 +131,7 @@ export function loadConfig(): Config {
     codeRetainSeconds,
     dbPath: process.env.REGBY_DB_PATH?.trim() || 'regby.db',
     eventExpirySeconds,
-    clockSkewSeconds: intEnv('REGBY_CLOCK_SKEW_SECONDS', 120),
+    clockSkewSeconds,
     rateMax: intEnv('REGBY_RATE_MAX', 30),
     rateWindowSeconds: intEnv('REGBY_RATE_WINDOW_SECONDS', 60),
     redeemRateMax: intEnv('REGBY_REDEEM_RATE_MAX', 300),

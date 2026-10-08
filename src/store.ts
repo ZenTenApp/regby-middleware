@@ -5,7 +5,7 @@
  *
  * Validity timestamps per row, both anchored to the merchant request's
  * `created_at` (skew-clamped by the caller):
- *   - `expires_at`   = startedAt + ttl     → code **validity** (2 min). Past this
+ *   - `expires_at`   = startedAt + ttl     → code **validity** (1 min). Past this
  *     a redeem returns `expired`, but the row is KEPT.
  *   - `retain_until` = startedAt + retain  → row **retention** (1 h). A redeem
  *     between expiry and retention still reports `expired` (clear UX: "the code

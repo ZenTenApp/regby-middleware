@@ -158,8 +158,8 @@ export class ReGBYBroker {
   /**
    * Clamp a merchant event's `created_at` to the server clock so the code TTL
    * anchor can't be abused: a future-dated stamp (would never expire) snaps to
-   * now; a stale stamp is capped to `now - skew` so it still gets most of its
-   * window. Within tolerance the merchant value passes through, keeping the POS
+   * now; a stale stamp is capped to `now - skew`, which `loadConfig` keeps
+   * under the TTL so the code is still live when minted. Within tolerance the merchant value passes through, keeping the POS
    * and server countdowns in sync.
    */
   private clampStart(createdAt: number): number {
