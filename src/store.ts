@@ -16,12 +16,15 @@
  * **Single-use**: the first successful redeem consumes the code - its `uri` is
  * wiped and `expires_at` pulled to now, so a second redeem reports `expired`
  * exactly like a lapsed code. The sweep also wipes the `uri` of every lapsed
- * row and checkpoints the WAL, so the plaintext invoice stays on disk at most
- * one sweep interval past validity or use: `secure_delete` zeroes the bytes in
- * the main file, and the TRUNCATE checkpoint drops the pre-wipe page images
- * the `-wal` log would otherwise keep. Only the code shell stays for the
- * retention window. The consume is a compare-and-set on the row itself, so a
- * code is served at most once even if the wall clock steps backward.
+ * row and checkpoints the WAL, so the `codes` table holds the plaintext invoice
+ * at most one sweep interval past validity or use: `secure_delete` zeroes the
+ * bytes in the main file, and the TRUNCATE checkpoint drops the pre-wipe page
+ * images the `-wal` log would otherwise keep. Only the code shell stays for the
+ * retention window. The same file also carries the append-only `events` table
+ * (`audit.ts`), which keeps every invoice for good - the wipe governs what can
+ * still be redeemed, not what is on record. The consume is a compare-and-set
+ * on the row itself, so a code is served at most once even if the wall clock
+ * steps backward.
  * `node:sqlite`'s synchronous API matches this single-process, single-loop
  * server - no async driver, no extra dependency.
  *
@@ -32,6 +35,7 @@ import { randomInt } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
 import { nowSeconds } from './time.ts';
+import { AuditLog, type AuditEntry } from './audit.ts';
 
 export interface MintResult {
   code: string;
@@ -39,15 +43,17 @@ export interface MintResult {
   expiresAt: number;
 }
 
-export type RedeemResult =
-  | { ok: true; uri: string }
-  | { ok: false; reason: 'not-found' | 'expired' };
+export type RedeemFailure = 'not-found' | 'expired';
+
+export type RedeemResult = { ok: true; uri: string } | { ok: false; reason: RedeemFailure };
 
 /** Shared surface of `CodeStore` and its rotating wrapper - the broker's seam. */
 export interface CodeStoreLike {
   mint(uri: string, startedAt: number): MintResult | null;
   redeem(code: string): RedeemResult;
   sweep(): void;
+  /** Append to the permanent audit trail in the current day's file. */
+  record(entry: AuditEntry): void;
   readonly size: number;
   close(): void;
 }
@@ -70,6 +76,7 @@ export class CodeStore implements CodeStoreLike {
   private readonly scrubStmt: StatementSync;
   private readonly sweepStmt: StatementSync;
   private readonly countStmt: StatementSync;
+  private readonly audit: AuditLog;
 
   constructor(
     private readonly ttlSeconds: number,
@@ -112,10 +119,15 @@ export class CodeStore implements CodeStoreLike {
     );
     this.sweepStmt = this.db.prepare('DELETE FROM codes WHERE retain_until <= ?');
     this.countStmt = this.db.prepare('SELECT COUNT(*) AS n FROM codes');
+    this.audit = new AuditLog(this.db, this.now);
   }
 
   get size(): number {
     return (this.countStmt.get() as { n: number }).n;
+  }
+
+  record(entry: AuditEntry): void {
+    this.audit.record(entry);
   }
 
   /**
@@ -280,6 +292,11 @@ export class RotatingCodeStore implements CodeStoreLike {
   sweep(): void {
     this.rotateIfNeeded();
     this.current.sweep();
+  }
+
+  record(entry: AuditEntry): void {
+    this.rotateIfNeeded();
+    this.current.record(entry);
   }
 
   // No rotateIfNeeded() here: `size` is read only right after a mint/redeem that

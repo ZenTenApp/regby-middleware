@@ -244,3 +244,63 @@ test('codes persist across a restart (reopen the same file)', () => {
     second.close();
   });
 });
+
+/** Every audit row, oldest first, read straight from the file (store closed). */
+function eventsOnDisk(path: string): Record<string, unknown>[] {
+  const db = new DatabaseSync(path);
+  const rows = db
+    .prepare('SELECT ts, event, pubkey, request_event, code, uri, valid_until, detail FROM events ORDER BY id')
+    .all() as Record<string, unknown>[];
+  db.close();
+  return rows.map((r) => ({ ...r })); // sqlite rows are null-prototype objects
+}
+
+const MERCHANT = 'a'.repeat(64);
+const CUSTOMER = 'b'.repeat(64);
+
+test('audit rows keep the full invoice for good, past use, sweep and close', () => {
+  withTempDb('audit', (path) => {
+    const clock = fixedClock();
+    const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+    const uri = 'defito://base/0xabc&amount=USDT:1&order_id=o1&valid_until=1795219200&nostr=npub1x';
+    const minted = store.mint(uri, clock.now());
+    assert.ok(minted);
+    store.record({ event: 'mint', pubkey: MERCHANT, requestEvent: 'req1', code: minted.code, uri });
+    clock.tick(30);
+    const redeemed = store.redeem(minted.code);
+    assert.ok(redeemed.ok);
+    store.record({ event: 'redeem', pubkey: CUSTOMER, requestEvent: 'req2', code: minted.code, uri: redeemed.uri });
+    store.record({ event: 'redeem_expired', pubkey: CUSTOMER, requestEvent: 'req3', code: minted.code });
+    // Past retention: the code row is purged, the history is not.
+    clock.tick(RETAIN);
+    store.sweep();
+    assert.equal(store.size, 0);
+    store.close();
+
+    assert.deepEqual(eventsOnDisk(path), [
+      { ts: 1000, event: 'mint', pubkey: MERCHANT, request_event: 'req1', code: minted.code, uri, valid_until: 1795219200, detail: null },
+      { ts: 1030, event: 'redeem', pubkey: CUSTOMER, request_event: 'req2', code: minted.code, uri, valid_until: 1795219200, detail: null },
+      { ts: 1030, event: 'redeem_expired', pubkey: CUSTOMER, request_event: 'req3', code: minted.code, uri: null, valid_until: null, detail: null },
+    ]);
+  });
+});
+
+test('audit rows land in the file of the day they happen and survive rotation', () => {
+  const clock = fixedClock(1_700_000_000);
+  const base = join(tmpdir(), `regby-audit-rot-${process.pid}.db`);
+  const day1 = dailyDbPath(base, clock.now());
+  try {
+    const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
+    const uri = 'defito://base/0xabc&amount=USDT:1&order_id=o1&valid_until=1795219200&nostr=npub1x';
+    store.record({ event: 'mint', pubkey: MERCHANT, requestEvent: 'req1', code: '12345678', uri });
+    clock.tick(86_400);
+    store.record({ event: 'redeem_not_found', pubkey: CUSTOMER, requestEvent: 'req2', code: '12345678' });
+    store.close();
+    // retire() wiped the codes table on the roll; the archived history kept its invoice.
+    assert.deepEqual(eventsOnDisk(day1).map((r) => [r.event, r.uri]), [['mint', uri]]);
+    assert.deepEqual(eventsOnDisk(dailyDbPath(base, clock.now())).map((r) => r.event), ['redeem_not_found']);
+  } finally {
+    rmDb(day1);
+    rmDb(dailyDbPath(base, clock.now()));
+  }
+});

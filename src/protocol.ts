@@ -271,11 +271,9 @@ function wouldRedeem(content: string): boolean {
  * explanation attached.
  */
 function lineWouldRedeem(line: string): boolean {
-  const rest = line.slice(DEFITO_PREFIX.length);
-  // The canonical separator is `&`; `?` on the first param is also accepted.
-  const qIdx = rest.search(/[?&]/);
-  if (qIdx === -1) return false; // no params at all
-  const path = rest.slice(0, qIdx);
+  const parts = splitLine(line);
+  if (!parts) return false; // no params at all
+  const { path, tail } = parts;
 
   // `<networks>/<recipients>`: both are comma lists, and the wallet needs at
   // least one entry in each, so `,,,/0xabc` is as dead as an empty half.
@@ -284,7 +282,6 @@ function lineWouldRedeem(line: string): boolean {
   if (csv(path.slice(0, slash)).length === 0) return false;
   if (csv(path.slice(slash + 1)).length === 0) return false;
 
-  const tail = rest.slice(qIdx + 1);
   if (!hasAmountShape(param(tail, 'amount'))) return false;
   // The order this invoice is for. The confirmation that settles it echoes this
   // value back, so an invoice without one can never be matched to its payment.
@@ -292,6 +289,38 @@ function lineWouldRedeem(line: string): boolean {
   // The wallet drops a line whose expiry it cannot parse.
   if (!VALID_UNTIL_RE.test(param(tail, 'valid_until') ?? '')) return false;
   return isIdentityKey(param(tail, 'nostr'));
+}
+
+/**
+ * A `defito://` line split into its `<networks>/<recipients>` path and its
+ * parameter tail, or null when it is another scheme or carries no parameters.
+ * The prefix check matters for the audit, which reads refused payloads too.
+ * The canonical separator is `&`; `?` on the first param is also accepted.
+ */
+function splitLine(line: string): { path: string; tail: string } | null {
+  if (!line.toLowerCase().startsWith(DEFITO_PREFIX)) return null;
+  const rest = line.slice(DEFITO_PREFIX.length);
+  const qIdx = rest.search(/[?&]/);
+  if (qIdx === -1) return null;
+  return { path: rest.slice(0, qIdx), tail: rest.slice(qIdx + 1) };
+}
+
+/**
+ * The invoice's expiry for the audit trail: the EARLIEST well-formed
+ * `valid_until` across its rails (the moment the whole request starts to lapse),
+ * or null when no rail carries one. Read with the same `param` as validation,
+ * so the audit never disagrees with what was accepted.
+ */
+export function validUntilOf(content: string): number | null {
+  let earliest: number | null = null;
+  for (const line of payloadLines(content)) {
+    const parts = splitLine(line);
+    const raw = parts && param(parts.tail, 'valid_until');
+    if (!raw || !VALID_UNTIL_RE.test(raw)) continue;
+    const value = Number(raw);
+    if (earliest === null || value < earliest) earliest = value;
+  }
+  return earliest;
 }
 
 /**

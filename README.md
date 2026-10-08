@@ -115,6 +115,25 @@ comes from the event signature alone, never from a successful decrypt.
   files are kept on disk as a daily archive. Only the current day's file is read
   or written - a code minted just before midnight is unreachable after the roll
   even within its retention window (a deliberate current-day-only trade).
+- **Audit log**: each daily file also holds an append-only `events` table, the
+  permanent history (never swept, wiped or deleted). One row per request the
+  server answered, with the server time, the **full** sender pubkey, the
+  request event id, the code, the **full invoice** and its earliest
+  `valid_until`:
+  `mint`, `mint_busy`, `redeem`, `redeem_expired`, `redeem_not_found`,
+  `invalid_request` (`detail` = `malformed` / `malicious`), `blacklisted`
+  (`malicious` / `guessing`), `reply_dropped` (`detail` = reply intent; on a
+  redeem, the code was burnt). Requests dropped before any work (blacklisted,
+  rate-limited, undecryptable) are not logged, so junk traffic can't fill the
+  disk. **This is a full payment history** - merchant and customer pubkeys,
+  recipients, amounts - so the `data/` folder and its backups need the same
+  protection as any customer database.
+
+  ```bash
+  # everything that happened to one code, across the day's file
+  sqlite3 data/2026/10/regby-2026-10-07.db \
+    "SELECT datetime(ts,'unixepoch'), event, pubkey, detail FROM events WHERE code='48213907' ORDER BY id"
+  ```
 - **Active deletion**: once a reply's `expiration` lapses, the server publishes a
   **NIP-09 `kind 5`** deletion for its own reply events (batched). NIP-40
   expiration is advisory - many relays ignore it - so we delete actively. Only the
@@ -222,6 +241,7 @@ before `docker compose up` recreates it.
 | `src/config.ts`     | env loading, key decode, pubkey derivation        |
 | `src/nostr.ts`      | relay pool, NIP-04 encrypt/decrypt, publish       |
 | `src/store.ts`      | SQLite code → URI store (2-min validity, single-use, 1-h retention) + per-UTC-day file rotation |
+| `src/audit.ts`      | append-only `events` table: permanent per-request history in each daily file |
 | `src/rate-limit.ts` | per-pubkey sliding window                         |
 | `src/blacklist.ts`  | 24h block list for malicious senders              |
 | `src/deletion-queue.ts` | tracks own reply ids → due NIP-09 deletions   |
