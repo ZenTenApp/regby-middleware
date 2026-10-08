@@ -68,8 +68,10 @@ comes from the event signature alone, never from a successful decrypt.
   would make a POS bug look like an outage. Undecryptable noise and malformed
   codes are still dropped silently.
 - What earns that softer refusal is exactly what the wallet screens, mirrored
-  field for field: a missing `<networks>/<recipients>`, `amount=`, `orderid=`
-  or decodable `nostr=<npub>`; an `amount=` whose shape is broken (`USDT:` is a
+  field for field: a missing `<networks>/<recipients>`, `amount=`, `order_id=`
+  or decodable `nostr=<npub>`; a missing or malformed `valid_until=` (unix
+  seconds as a plain positive integer - whether it has PASSED is the wallet's
+  call, on its own clock); an `amount=` whose shape is broken (`USDT:` is a
   truncated amount, `:5` names no coin); hidden, bidi or markup characters
   anywhere in the payload, read both as written and as the wallet will decode
   them; and more than 20 lines, past which the wallet drops the surplus and
@@ -88,7 +90,7 @@ comes from the event signature alone, never from a successful decrypt.
 - Nothing past that is validated here, on purpose. Chain names, coin symbols,
   address formats and amount values come from a stablecoin registry that updates
   without a server deploy, so a list frozen here would start refusing valid
-  payloads the day a chain is added. `orderid` is likewise opaque: we check it
+  payloads the day a chain is added. `order_id` is likewise opaque: we check it
   is present, never what it contains. The wallet re-validates all of it at
   redeem, where the registry lives - and must anyway, since this server is
   untrusted and nothing it approves is a safety guarantee.
@@ -169,6 +171,48 @@ npm run build && npm start
 The boot log prints the derived public key - copy it into the app's
 `REGBY_MIDDLEMAN_PUBKEY` constant. Set `REGBY_EXPECTED_PUBKEY` to have the server
 assert that match itself.
+
+### Docker
+
+```bash
+docker compose up -d --build
+docker compose logs regby | grep dbPath   # must print /data/regby.db
+```
+
+The code store lives on the host in `./data` (override with `REGBY_DATA_DIR`
+in `.env`), bind-mounted at `/data`, as `YYYY/MM/regby-YYYY-MM-DD.db`. It
+survives rebuilds, container recreation, `docker compose down -v` and
+`docker volume prune`. Compose pins `REGBY_DB_PATH=/data/regby.db`, so `.env`
+cannot move the store off the mount.
+
+The container runs as root, so the files are root-owned: run the commands
+below as root (or with `sudo`).
+
+**Backups**: past days' files are closed and safe to copy as-is. Today's file
+is live (WAL mode); copy it with
+`sqlite3 data/YYYY/MM/regby-<today>.db ".backup today.db"`, not `cp`.
+
+**Migrating from the old named volume** (`regby-data`): stop the service, copy
+the volume into the new folder, then start the new setup. The volume name
+carries the compose project name (the repo folder by default), so confirm it
+first.
+
+```bash
+docker volume ls | grep regby-data        # e.g. regby-middleware_regby-data
+docker stop regby                         # closes today's db cleanly
+mkdir -p data
+cp -a "$(docker volume inspect -f '{{.Mountpoint}}' regby-middleware_regby-data)/." data/
+find data -name 'regby-*.db' | wc -l      # one file per day served so far
+docker compose up -d --build
+```
+
+Once the new setup has run cleanly for a few days, drop the old volume:
+`docker volume rm regby-middleware_regby-data`.
+
+If the old deploy had `REGBY_DB_PATH=regby.db` in `.env`, the files were in the
+container under `/app/YYYY/...` instead. Copy out each year folder with
+`docker cp regby:/app/YYYY ./data/` while the old container still exists, i.e.
+before `docker compose up` recreates it.
 
 ## Layout
 

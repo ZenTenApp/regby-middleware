@@ -29,8 +29,8 @@ named in the invoice it answers and never passes through this broker.
 
 Decrypted `content` (the merchant's multi-option request):
 ```
-defito://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&orderid=9f2c14ab7e5d4083b6a1cc90de3f7721
-defito://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&orderid=9f2c14ab7e5d4083b6a1cc90de3f7721
+defito://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&order_id=9f2c14ab7e5d4083b6a1cc90de3f7721&valid_until=1750580100
+defito://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&order_id=9f2c14ab7e5d4083b6a1cc90de3f7721&valid_until=1750580100
 ```
 Event on relay:
 ```json
@@ -48,9 +48,9 @@ Event on relay:
   "sig": "…"
 }
 ```
-Server: read `i:request_regby_code` → decrypt → validate every line is a `defito://` invoice → `store.mint(uri, clampToSkew(created_at))` → 8-digit code (SQLite row), valid 2 min from the merchant's `created_at` (or until first redeem), retained 1 h. Anything else → `i:regby_code` with `Invalid Request` (a reason, not a code) + 24h blacklist (see error variant). A `defito://` payload the wallet would refuse at redeem gets the same reply WITHOUT the blacklist: a broken client is not an attacker. That covers a missing `<networks>/<recipients>`, `amount=`, `orderid=` or decodable `nostr=<npub>`, a broken `amount=` shape (`USDT:`, `:5`), hidden/bidi/markup characters anywhere in the payload, and more than 20 lines - each one mirroring a screen the wallet runs, because a code that mints here and dies at redeem leaves the merchant nothing to act on. The payload is judged TRIMMED, like the wallet judges it, and only ONE line has to be redeemable: the wallet drops a rail it cannot parse and pays from the rest, so an empty or half-built rail beside a good one still mints.
+Server: read `i:request_regby_code` → decrypt → validate every line is a `defito://` invoice → `store.mint(uri, clampToSkew(created_at))` → 8-digit code (SQLite row), valid 2 min from the merchant's `created_at` (or until first redeem), retained 1 h. Anything else → `i:regby_code` with `Invalid Request` (a reason, not a code) + 24h blacklist (see error variant). A `defito://` payload the wallet would refuse at redeem gets the same reply WITHOUT the blacklist: a broken client is not an attacker. That covers a missing `<networks>/<recipients>`, `amount=`, `order_id=` or decodable `nostr=<npub>`, a missing or malformed `valid_until=` (unix seconds, plain positive integer), a broken `amount=` shape (`USDT:`, `:5`), hidden/bidi/markup characters anywhere in the payload, and more than 20 lines - each one mirroring a screen the wallet runs, because a code that mints here and dies at redeem leaves the merchant nothing to act on. The payload is judged TRIMMED, like the wallet judges it, and only ONE line has to be redeemable: the wallet drops a rail it cannot parse and pays from the rest, so an empty or half-built rail beside a good one still mints.
 
-Past that the server validates nothing - networks, coins, address formats and amount values are the wallet's business, and it holds plaintext it never needed to understand. `orderid` is likewise opaque: we check it is PRESENT and never look at its contents, so the wallet is free to change how it mints one.
+Past that the server validates nothing - networks, coins, address formats and amount values are the wallet's business, and it holds plaintext it never needed to understand. `order_id` is likewise opaque: we check it is PRESENT and never look at its contents, so the wallet is free to change how it mints one.
 
 ## Hop 2 - middleman → merchant (`i: regby_code`)
 
@@ -105,8 +105,8 @@ Server: `store.redeem("42891337")` → found + unexpired → returns URI and **c
 
 Decrypted `content` (same multi-option URI the merchant sent):
 ```
-defito://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&orderid=9f2c14ab7e5d4083b6a1cc90de3f7721
-defito://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&orderid=9f2c14ab7e5d4083b6a1cc90de3f7721
+defito://base/0x075eC7591B346391cBe5BdEc297bB1C80D335807&amount=EURC:1.00&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&order_id=9f2c14ab7e5d4083b6a1cc90de3f7721&valid_until=1750580100
+defito://bnbchain,solana,ethereum,tron/coffeeshop@swap-provider.com&amount=USDT,USDC,PYUSD:1.18&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef&order_id=9f2c14ab7e5d4083b6a1cc90de3f7721&valid_until=1750580100
 ```
 Event:
 ```json

@@ -1,6 +1,7 @@
 /**
  * Entry point: load config, start the broker, handle graceful shutdown.
  */
+import { resolve } from 'node:path';
 import { loadConfig } from './config.ts';
 import { configureLogger, logger } from './logger.ts';
 import { ReGBYBroker } from './server.ts';
@@ -13,6 +14,8 @@ function main(): void {
     pubkey: config.publicKey,
     relays: config.relays,
     codeTtlSeconds: config.codeTtlSeconds,
+    // Absolute, so a deploy can confirm the store sits on the mounted volume.
+    dbPath: resolve(config.dbPath),
   });
 
   const broker = new ReGBYBroker(config);

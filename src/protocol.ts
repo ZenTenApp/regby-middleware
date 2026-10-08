@@ -186,7 +186,7 @@ export function parseInbound(intent: InboundIntent, content: string): ParseResul
 /**
  * An invoice payload is one or more line-separated lines, every non-empty one a
  * `defito://` URI. The multiple lines are the merchant's ranked fallback rails
- * for ONE order, so they should share an `orderid` (not compared here).
+ * for ONE order, so they should share an `order_id` (not compared here).
  *
  * Only the scheme is checked here; the rest lives in `wouldRedeem`. A line
  * that is ONLY the scheme carries the scheme, so it passes THIS gate and is
@@ -255,10 +255,11 @@ function wouldRedeem(content: string): boolean {
  * prefix.
  *
  * Everything checked here is safe to check on this side because none of it can
- * drift: the shape is fixed by the grammar, `orderid` is
- * an opaque token we only check the presence of, and `nostr` is a bech32 key
- * that decodes or does not. Chain names, coin symbols, address formats and
- * amount VALUES are deliberately still not checked. They come from a stablecoin
+ * drift: the shape is fixed by the grammar, `order_id` is an opaque token we
+ * only check the presence of, `valid_until` is unix seconds whose SHAPE we
+ * check (whether it has passed is the wallet's call, on its own clock), and
+ * `nostr` is a bech32 key that decodes or does not. Chain names, coin symbols,
+ * address formats and amount VALUES are deliberately still not checked. They come from a stablecoin
  * registry that updates without a server deploy, so a list frozen here would
  * start refusing valid payloads the day a chain is added, and the refusal
  * costs a merchant a reply they cannot act on. The wallet re-validates
@@ -287,9 +288,19 @@ function lineWouldRedeem(line: string): boolean {
   if (!hasAmountShape(param(tail, 'amount'))) return false;
   // The order this invoice is for. The confirmation that settles it echoes this
   // value back, so an invoice without one can never be matched to its payment.
-  if (!param(tail, 'orderid')) return false;
+  if (!param(tail, 'order_id')) return false;
+  // The wallet drops a line whose expiry it cannot parse.
+  if (!VALID_UNTIL_RE.test(param(tail, 'valid_until') ?? '')) return false;
   return isIdentityKey(param(tail, 'nostr'));
 }
+
+/**
+ * `valid_until=<unix seconds>`: a plain positive decimal integer, no sign,
+ * leading zero or exponent, at most 12 digits. Mirrors `parseValidUntil` in the
+ * app's `utils/invoice-validity.ts`; a looser check here mints codes the wallet
+ * drops at redeem.
+ */
+const VALID_UNTIL_RE = /^[1-9]\d{0,11}$/;
 
 /**
  * `amount=<coins>[:<value>]`. The coin list is required; the value half is
