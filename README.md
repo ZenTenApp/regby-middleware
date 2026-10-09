@@ -99,11 +99,11 @@ comes from the event signature alone, never from a successful decrypt.
   redeem, where the registry lives - and must anyway, since this server is
   untrusted and nothing it approves is a safety guarantee.
 - **request_regby_content** → look up the code. Valid → reply `i:regby_content` with the URI.
-  **Single-use**: the first successful redeem consumes the code and wipes its
-  URI. A code expires after 1 min or its first use, whichever comes first; the
-  60s sweep wipes the URI of lapsed codes and checkpoints the WAL so no copy
-  lingers there; shutdown wipes lapsed ones too, and day rotation wipes every
-  URI left in the outgoing file. Consume happens before the reply is
+  **Single-use**: the first successful redeem consumes the code. A code
+  expires after 1 min or its first use, whichever comes first. The live file
+  keeps every code's URI, used or lapsed, until the row is deleted 24 h after
+  issue, so recent codes can be debugged straight from the db; day rotation
+  wipes every URI left in the outgoing file. Consume happens before the reply is
   published, so a reply no relay accepted still burns the code (logged as a
   warning); the merchant re-mints. While the row is **retained** (within 1 h of
   the merchant's request): already redeemed → `i:regby_content` `Code Already Redeemed`
@@ -167,8 +167,8 @@ comes from the event signature alone, never from a successful decrypt.
 - Strict content validation; length caps.
 - Decrypted URIs / live codes are logged only at `debug`.
 
-> **Trust note.** Between mint and redeem the server holds the plaintext
-> `defito://` URI, so a compromised server could hand the customer a different
+> **Trust note.** For 24 h after issue the server's live file holds the
+> plaintext `defito://` URI, so a compromised server could hand the customer a different
 > recipient. The customer still confirms recipient + amount on-device before
 > signing. Future hardening (out of scope): merchant signs the URI, customer
 > verifies against the merchant npub.

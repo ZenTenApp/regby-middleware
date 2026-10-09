@@ -73,7 +73,7 @@ test('redeem is single-use: a second redeem reports redeemed', () => {
   clock.tick(30);
   assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
-  assert.equal(store.size, 1); // shell kept for retention, so it reads redeemed, not a guess
+  assert.equal(store.size, 1); // row kept for retention, so it reads redeemed, not a guess
 });
 
 test('a redeemed code reads redeemed for its whole retention, never expired', () => {
@@ -86,20 +86,20 @@ test('a redeemed code reads redeemed for its whole retention, never expired', ()
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
   clock.tick(1); // at the validity boundary: used, not lapsed
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
-  store.sweep(); // the scrub must not blur used into lapsed
+  store.sweep(); // a sweep must not turn a used code into a lapsed one
   clock.tick(RETAIN - TTL - 1);
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
   clock.tick(1); // at the retention boundary: gone
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
 });
 
-test('a lapsed code the sweep wiped stays expired when the clock steps back', () => {
+test('a lapsed code stays expired when the clock steps back', () => {
   const clock = fixedClock();
   const store = memStore(clock);
   const minted = store.mint('defito://base/0xabc', clock.now());
   assert.ok(minted);
   clock.tick(TTL);
-  store.sweep(); // never redeemed: uri wiped, redeemed_at still NULL
+  store.sweep(); // the 60 s timer is what sees the time pass in production
   clock.tick(-10); // back inside the validity window
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
 });
@@ -123,8 +123,8 @@ test('a daily file from before redeemed_at gains the column and keeps its codes'
   });
 });
 
-test('sweep wipes the uri of consumed and lapsed rows, not of valid ones', () => {
-  withTempDb('scrub', (path) => {
+test('the live file keeps every invoice, used, lapsed or valid, for debugging', () => {
+  withTempDb('keep', (path) => {
     const clock = fixedClock();
     const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
     const used = store.mint('defito://used', clock.now());
@@ -134,10 +134,10 @@ test('sweep wipes the uri of consumed and lapsed rows, not of valid ones', () =>
     assert.ok(store.redeem(used.code).ok);
     clock.tick(TTL); // `lapsed` hits expiry, `valid` has one second left
     store.sweep();
-    store.close();
+    store.close(); // and a shutdown keeps them for the restart
     const uris = urisOnDisk(path);
-    assert.equal(uris.get(used.code), '');
-    assert.equal(uris.get(lapsed.code), '');
+    assert.equal(uris.get(used.code), 'defito://used');
+    assert.equal(uris.get(lapsed.code), 'defito://lapsed');
     assert.equal(uris.get(valid.code), 'defito://valid');
   });
 });
@@ -153,7 +153,7 @@ test('a consumed code stays consumed when the wall clock steps backward', () => 
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
 });
 
-test('sweep leaves no consumed invoice in the db or its -wal log', () => {
+test('an invoice leaves the db and its -wal log with its row, 24 h after issue', () => {
   withTempDb('wal', (path) => {
     const clock = fixedClock();
     const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
@@ -161,29 +161,15 @@ test('sweep leaves no consumed invoice in the db or its -wal log', () => {
     const minted = store.mint(sentinel, clock.now());
     assert.ok(minted);
     assert.ok(store.redeem(minted.code).ok);
+    clock.tick(CODE_REUSE_SECONDS);
     store.sweep();
-    // Store still open: the WAL is live, exactly where a pre-wipe frame hid.
+    // Store still open: the WAL is live, exactly where a pre-delete frame hid.
     for (const file of [path, `${path}-wal`]) {
       if (!existsSync(file)) continue; // a removed -wal is as clean as it gets
       const bytes = readFileSync(file).toString('latin1');
       assert.ok(!bytes.includes(sentinel), `${file} still holds the invoice`);
     }
     store.close();
-  });
-});
-
-test('close wipes lapsed invoices but keeps valid ones for the restart', () => {
-  withTempDb('close', (path) => {
-    const clock = fixedClock();
-    const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
-    const lapsed = store.mint('defito://lapsed', clock.now());
-    const valid = store.mint('defito://valid', clock.now() + TTL / 2);
-    assert.ok(lapsed && valid);
-    clock.tick(TTL); // `lapsed` is at expiry, `valid` has half its window left
-    store.close();
-    const uris = urisOnDisk(path);
-    assert.equal(uris.get(lapsed.code), '');
-    assert.equal(uris.get(valid.code), 'defito://valid');
   });
 });
 
@@ -404,5 +390,26 @@ test('a startup after several midnights wipes every older archive, not only yest
     rmDb(day1);
     rmDb(day2);
     rmDb(dailyDbPath(base, clock.now()));
+  }
+});
+
+test('a clock stepping back across midnight stays on today\'s file and keeps its invoices', () => {
+  const clock = fixedClock(BEFORE_MIDNIGHT);
+  const base = join(tmpdir(), `regby-stepback-${process.pid}.db`);
+  const day1 = dailyDbPath(base, clock.now());
+  try {
+    const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
+    clock.tick(40); // 00:00:10 next day
+    const day2 = dailyDbPath(base, clock.now());
+    const minted = store.mint('defito://today', clock.now());
+    assert.ok(minted);
+    clock.tick(-60); // NTP steps back to 23:59:10 yesterday
+    // Still today's file: the code is live and its invoice intact.
+    assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://today' });
+    store.close();
+    assert.equal(urisOnDisk(day2).get(minted.code), 'defito://today');
+  } finally {
+    rmDb(day1);
+    rmDb(dailyDbPath(base, BEFORE_MIDNIGHT + 40));
   }
 });
