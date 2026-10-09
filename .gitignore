@@ -2,11 +2,13 @@ node_modules/
 dist/
 .env
 .env.local
+.env.audit-sink
 *.log
 .DS_Store
 # SQLite code store (+ WAL/SHM sidecars)
 regby.db
 /data/
+/audit-data/
 *.db
 *.db-wal
 *.db-shm

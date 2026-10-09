@@ -12,7 +12,7 @@
 import type { Event } from 'nostr-tools';
 import type { Config } from './config.ts';
 import { createTransport, type ReGBYTransport, type ReplyTarget } from './nostr.ts';
-import { RotatingCodeStore, type CodeStoreLike, type RedeemFailure } from './store.ts';
+import { RotatingCodeStore, type CodeStoreLike, type RedeemFailureReason } from './store.ts';
 import { RateLimiter } from './rate-limit.ts';
 import { Blacklist } from './blacklist.ts';
 import { BoundedMap } from './bounded-map.ts';
@@ -21,34 +21,41 @@ import {
   extractIntent,
   parseInbound,
   REPLY_INTENT,
+  REPLY_REASON,
   type InboundMessage,
   type OutboundIntent,
 } from './protocol.ts';
-import type { AuditEntry, AuditEvent } from './audit.ts';
+import { HttpAuditSink, NO_AUDIT, type AuditEntry, type AuditSink } from './audit-sender.ts';
 import { logger } from './logger.ts';
 
-/** Audit event and reply text for each way a redeem can be refused. */
-const REDEEM_REFUSAL = {
-  expired: { event: 'redeem_expired', reply: 'Code Expired' },
-  'not-found': { event: 'redeem_not_found', reply: 'Code Not Found' },
-} as const satisfies Record<RedeemFailure, { event: AuditEvent; reply: string }>;
+/** What a call site adds to an audit record; the target supplies the rest. */
+type AuditFields = Omit<AuditEntry, 'pubkey' | 'requestEvent'>;
 
 /** Remember processed event ids so a relay re-delivery can't double-mint. */
 const SEEN_MAX = 50_000;
 
-/** Single bucket key for the global (all-sender) redeem limiter. */
-const GLOBAL_REDEEM_KEY = 'all';
+/** Reply content per redeem refusal (see `REPLY_REASON` for the app contract). */
+const REDEEM_FAILURE_REPLY: Record<RedeemFailureReason, string> = {
+  redeemed: REPLY_REASON.redeemed,
+  expired: REPLY_REASON.expired,
+  'not-found': REPLY_REASON.notFound,
+};
+
+/** Single bucket key for the global (all-sender) limiters. */
+const GLOBAL_KEY = 'all';
 
 export class ReGBYBroker {
   private readonly transport: ReGBYTransport;
   private readonly store: CodeStoreLike;
   private readonly limiter: RateLimiter;
-  // Aggregate redeem cap across every sender - a per-pubkey limit alone can't
-  // stop enumeration by an attacker who rotates through free, fresh pubkeys.
+  // Aggregate caps across every sender: a per-pubkey limit alone can't bind an
+  // attacker who rotates through free, fresh pubkeys (see `Config`).
+  private readonly mintLimiter: RateLimiter;
   private readonly redeemLimiter: RateLimiter;
   // Per-sender not-found redeem strikes; exceeding the cap blacklists a guesser.
   private readonly redeemFails: RateLimiter;
   private readonly blacklist: Blacklist;
+  private readonly auditSink: AuditSink;
   private readonly seen = new BoundedMap<string, true>(SEEN_MAX);
   private subscription: { close: () => void } | null = null;
   private sweepTimer: NodeJS.Timeout | null = null;
@@ -67,9 +74,11 @@ export class ReGBYBroker {
       config.dbPath,
     );
     this.limiter = new RateLimiter(config.rateMax, config.rateWindowSeconds);
+    this.mintLimiter = new RateLimiter(config.mintRateMax, config.mintRateWindowSeconds);
     this.redeemLimiter = new RateLimiter(config.redeemRateMax, config.redeemRateWindowSeconds);
     this.redeemFails = new RateLimiter(config.redeemFailMax, config.redeemRateWindowSeconds);
     this.blacklist = new Blacklist(config.blacklistSeconds);
+    this.auditSink = config.audit ? new HttpAuditSink(config.audit) : NO_AUDIT;
   }
 
   start(): void {
@@ -82,9 +91,9 @@ export class ReGBYBroker {
     // Periodic store/limiter/blacklist hygiene + NIP-09 deletion of our replies.
     this.sweepTimer = setInterval(() => {
       this.store.sweep();
-      this.limiter.sweep();
-      this.redeemLimiter.sweep();
-      this.redeemFails.sweep();
+      for (const l of [this.limiter, this.mintLimiter, this.redeemLimiter, this.redeemFails]) {
+        l.sweep();
+      }
       this.blacklist.sweep();
       void this.transport.purgeExpired();
     }, 60_000);
@@ -92,11 +101,13 @@ export class ReGBYBroker {
     logger.info('Broker started', { pubkey: this.config.publicKey });
   }
 
-  stop(): void {
+  /** Async only for the audit's last flush; everything else closes at once. */
+  async stop(): Promise<void> {
     this.subscription?.close();
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.transport.close();
     this.store.close();
+    await this.auditSink.close();
     logger.info('Broker stopped');
   }
 
@@ -138,6 +149,16 @@ export class ReGBYBroker {
     const target: ReplyTarget = { recipientPubkey: event.pubkey, requestEventId: event.id };
     const parsed = parseInbound(intent, plaintext);
     if (!parsed.ok) {
+      if (parsed.reason === 'binary') {
+        // Bytes, not text: no reply, nothing stored. Info, not warn: any
+        // signer can send bytes, and a flood must not drown the warn log.
+        logger.info('Binary content - dropping', {
+          id: event.id.slice(0, 12),
+          from: event.pubkey.slice(0, 12),
+          intent,
+        });
+        return;
+      }
       if (parsed.reason === 'silent') {
         logger.debug('Unusable content - dropping', { id: event.id.slice(0, 12), intent });
         return;
@@ -146,12 +167,11 @@ export class ReGBYBroker {
       // A `malformed` payload was `defito://` but omitted a required
       // field, which is a broken client - telling them is the useful response,
       // and a 24 h lockout would just make a POS bug look like an outage.
-      this.audit(target, { event: 'invalid_request', uri: plaintext, detail: parsed.reason });
-      if (parsed.reason === 'malicious') {
+      const malicious = parsed.reason === 'malicious';
+      if (malicious) {
         // Aiming a foreign scheme at us after proving they hold the
         // conversation key is deliberate. Block the sender and tell them once.
         this.blacklist.block(event.pubkey);
-        this.audit(target, { event: 'blacklisted', detail: 'malicious' });
         logger.warn('Blacklisted sender - malicious request_regby_code', {
           from: event.pubkey.slice(0, 12),
         });
@@ -160,10 +180,12 @@ export class ReGBYBroker {
       }
       // Neither verdict arises for request_regby_content, so the failure
       // reuses request_regby_code's success intent (`regby_code`); the
-      // non-code content reads as an error. `Invalid Request` is one of the
-      // four reasons the app will surface verbatim, anything else renders as
-      // its generic fallback.
-      await this.reply(target, REPLY_INTENT.request_regby_code, 'Invalid Request');
+      // non-code content reads as an error.
+      await this.answer(target, REPLY_INTENT.request_regby_code, REPLY_REASON.invalid, {
+        event: malicious ? 'blacklisted' : 'invalid_request',
+        detail: parsed.reason,
+        refusedPayload: plaintext,
+      });
       return;
     }
 
@@ -173,8 +195,8 @@ export class ReGBYBroker {
   /**
    * Clamp a merchant event's `created_at` to the server clock so the code TTL
    * anchor can't be abused: a future-dated stamp (would never expire) snaps to
-   * now; a stale stamp is capped to `now - skew` so it still gets most of its
-   * window. Within tolerance the merchant value passes through, keeping the POS
+   * now; a stale stamp is capped to `now - skew`, which `loadConfig` keeps
+   * under the TTL so the code is still live when minted. Within tolerance the merchant value passes through, keeping the POS
    * and server countdowns in sync.
    */
   private clampStart(createdAt: number): number {
@@ -192,25 +214,36 @@ export class ReGBYBroker {
   ): Promise<void> {
     const from = target.recipientPubkey.slice(0, 12);
     if (message.intent === 'request_regby_code') {
+      // No reply past the ceiling: answering would publish one event per
+      // flooded request, the very load the ceiling exists to stop.
+      if (!this.mintLimiter.allow(GLOBAL_KEY)) {
+        logger.warn('Global mint rate limit hit - dropping', { from });
+        return;
+      }
       const minted = this.store.mint(message.uri, this.clampStart(createdAt));
       if (!minted) {
         logger.warn('Mint failed (store full / no free code)', { size: this.store.size });
-        this.audit(target, { event: 'mint_busy', uri: message.uri });
-        await this.reply(target, REPLY_INTENT.request_regby_code, 'Service Busy, Try Again');
+        await this.answer(target, REPLY_INTENT.request_regby_code, REPLY_REASON.busy, {
+          event: 'regby_busy',
+          uri: message.uri,
+        });
         return;
       }
-      this.audit(target, { event: 'mint', code: minted.code, uri: message.uri });
       logger.info('Minted code', {
         from,
         expiresAt: minted.expiresAt,
       });
-      await this.reply(target, REPLY_INTENT.request_regby_code, minted.code, minted.code);
+      await this.answer(target, REPLY_INTENT.request_regby_code, minted.code, {
+        event: 'code_issued',
+        code: minted.code,
+        uri: message.uri,
+      });
       return;
     }
 
     // request_regby_content (redeem, single-use). A global ceiling bounds total
     // guess rate regardless of how many pubkeys an attacker rotates through.
-    if (!this.redeemLimiter.allow(GLOBAL_REDEEM_KEY)) {
+    if (!this.redeemLimiter.allow(GLOBAL_KEY)) {
       logger.warn('Global redeem rate limit hit - dropping', {
         from,
       });
@@ -219,42 +252,38 @@ export class ReGBYBroker {
 
     const result = this.store.redeem(message.code);
     if (!result.ok) {
-      // A not-found (as opposed to expired) is a miss against the code space -
+      // A not-found (as opposed to expired/redeemed) is a miss against the code space -
       // i.e. a guess. Count strikes per sender and blacklist a persistent
       // guesser; return no reply so the failure isn't an enumeration oracle.
-      const refusal = REDEEM_REFUSAL[result.reason];
-      this.audit(target, { event: refusal.event, code: message.code });
       if (result.reason === 'not-found' && !this.redeemFails.allow(target.recipientPubkey)) {
         this.blacklist.block(target.recipientPubkey);
-        this.audit(target, { event: 'blacklisted', code: message.code, detail: 'guessing' });
         logger.warn('Blacklisted sender - repeated code guessing', {
           from,
         });
+        this.audit(target, { event: 'blacklisted', code: message.code, detail: 'guessing' });
         return;
       }
       logger.info('Redeem rejected', {
         from,
         reason: result.reason,
       });
-      await this.reply(
+      await this.answer(
         target,
         REPLY_INTENT.request_regby_content,
-        refusal.reply,
-        message.code,
+        REDEEM_FAILURE_REPLY[result.reason],
+        { event: 'redeem_refused', code: message.code, detail: result.reason },
       );
       return;
     }
-    this.audit(target, { event: 'redeem', code: message.code, uri: result.uri });
     logger.info('Redeemed code', { from });
     // Consume-before-publish is the at-most-once order, so a reply no relay
-    // took has already burnt the code: the customer's retry reads Code Expired
-    // and the merchant must re-mint. Surface it, or it looks like user error.
-    const delivered = await this.reply(
-      target,
-      REPLY_INTENT.request_regby_content,
-      result.uri,
-      message.code,
-    );
+    // took has already burnt the code: the customer's retry is refused and the
+    // merchant must re-mint. Surface it, or it looks like user error.
+    const delivered = await this.answer(target, REPLY_INTENT.request_regby_content, result.uri, {
+      event: 'redeem',
+      code: message.code,
+      uri: result.uri,
+    });
     if (!delivered) {
       logger.warn('Code consumed but its reply reached no relay', {
         from,
@@ -263,44 +292,26 @@ export class ReGBYBroker {
   }
 
   /**
-   * Audit row for the sender and request `target` answers. Best-effort: a
-   * failed insert (disk full, locked file) must not abort the handler, which
-   * runs un-awaited, so a throw would crash the process and drop a reply whose
-   * code was already minted or consumed.
+   * Reply, then record the request with whether the reply reached a relay: one
+   * record per answered request, so a reply no relay took keeps its invoice
+   * and code on record (for a redeem, the code is already burnt).
    */
-  private audit(
-    target: ReplyTarget,
-    entry: Omit<AuditEntry, 'pubkey' | 'requestEvent'>,
-  ): void {
-    try {
-      this.store.record({
-        ...entry,
-        pubkey: target.recipientPubkey,
-        requestEvent: target.requestEventId,
-      });
-    } catch (err) {
-      logger.error('Audit write failed', {
-        event: entry.event,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  /**
-   * Every reply goes through here so one no relay accepted is always on
-   * record: for a mint the merchant never saw their code, for a redeem the
-   * code is already burnt.
-   */
-  private async reply(
+  private async answer(
     target: ReplyTarget,
     intent: OutboundIntent,
     content: string,
-    code?: string,
+    fields: AuditFields,
   ): Promise<boolean> {
     const delivered = await this.transport.reply(target, intent, content);
-    if (!delivered) {
-      this.audit(target, { event: 'reply_dropped', detail: intent, code });
-    }
+    this.audit(target, { ...fields, delivered });
     return delivered;
+  }
+
+  private audit(target: ReplyTarget, fields: AuditFields): void {
+    this.auditSink.record({
+      ...fields,
+      pubkey: target.recipientPubkey,
+      requestEvent: target.requestEventId,
+    });
   }
 }

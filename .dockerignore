@@ -3,7 +3,9 @@ dist
 .git
 .env
 .env.local
+.env.audit-sink
 data
+audit-data
 *.db
 *.db-wal
 *.db-shm

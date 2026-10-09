@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { CodeStore, RotatingCodeStore, dailyDbPath } from './store.ts';
+import { dirname, join } from 'node:path';
+import { CODE_REUSE_SECONDS, CodeStore, RotatingCodeStore, dailyDbPath } from './store.ts';
 
 const TTL = 120; // 2-min validity
 const RETAIN = 3600; // 1-h retention
@@ -65,15 +65,62 @@ test('mint rejects an already-expired anchor', () => {
   assert.equal(store.mint('defito://base/0xabc', clock.now() - TTL), null);
 });
 
-test('redeem is single-use: a second redeem within validity reports expired', () => {
+test('redeem is single-use: a second redeem reports redeemed', () => {
   const clock = fixedClock();
   const store = memStore(clock);
   const minted = store.mint('defito://base/0xabc', clock.now());
   assert.ok(minted);
   clock.tick(30);
   assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
+  assert.equal(store.size, 1); // shell kept for retention, so it reads redeemed, not a guess
+});
+
+test('a redeemed code reads redeemed for its whole retention, never expired', () => {
+  const clock = fixedClock();
+  const store = memStore(clock);
+  const minted = store.mint('defito://base/0xabc', clock.now());
+  assert.ok(minted);
+  assert.ok(store.redeem(minted.code).ok);
+  clock.tick(TTL - 1);
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
+  clock.tick(1); // at the validity boundary: used, not lapsed
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
+  store.sweep(); // the scrub must not blur used into lapsed
+  clock.tick(RETAIN - TTL - 1);
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
+  clock.tick(1); // at the retention boundary: gone
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
+});
+
+test('a lapsed code the sweep wiped stays expired when the clock steps back', () => {
+  const clock = fixedClock();
+  const store = memStore(clock);
+  const minted = store.mint('defito://base/0xabc', clock.now());
+  assert.ok(minted);
+  clock.tick(TTL);
+  store.sweep(); // never redeemed: uri wiped, redeemed_at still NULL
+  clock.tick(-10); // back inside the validity window
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
-  assert.equal(store.size, 1); // shell kept for retention, so it reads expired, not a guess
+});
+
+test('a daily file from before redeemed_at gains the column and keeps its codes', () => {
+  withTempDb('migrate', (path) => {
+    const old = new DatabaseSync(path);
+    old.exec(`
+      CREATE TABLE codes (
+        code TEXT PRIMARY KEY, uri TEXT NOT NULL, created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL, retain_until INTEGER NOT NULL
+      );
+      INSERT INTO codes VALUES ('12345678', 'defito://old', 1000, ${1000 + TTL}, ${1000 + RETAIN});
+    `);
+    old.close();
+    const clock = fixedClock();
+    const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+    assert.deepEqual(store.redeem('12345678'), { ok: true, uri: 'defito://old' });
+    assert.deepEqual(store.redeem('12345678'), { ok: false, reason: 'redeemed' });
+    store.close();
+  });
 });
 
 test('sweep wipes the uri of consumed and lapsed rows, not of valid ones', () => {
@@ -103,7 +150,7 @@ test('a consumed code stays consumed when the wall clock steps backward', () => 
   clock.tick(60);
   assert.ok(store.redeem(minted.code).ok);
   clock.tick(-30); // NTP correction / VM restore lands before the consume
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
 });
 
 test('sweep leaves no consumed invoice in the db or its -wal log', () => {
@@ -151,14 +198,20 @@ test('past validity but within retention reports expired and KEEPS the row', () 
   assert.equal(store.size, 1);
 });
 
-test('past retention reports not-found and purges the row', () => {
+test('past the answer window: not-found, but the row holds its number for 24 h', () => {
   const clock = fixedClock();
   const store = memStore(clock);
   const minted = store.mint('defito://base/0xabc', clock.now());
   assert.ok(minted);
-  clock.tick(RETAIN); // at retention boundary
+  clock.tick(RETAIN); // at the answer-window boundary
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
-  assert.equal(store.size, 0);
+  assert.equal(store.size, 1); // still reserved
+  clock.tick(CODE_REUSE_SECONDS - RETAIN - 1);
+  store.sweep();
+  assert.equal(store.size, 1); // one second short of 24 h
+  clock.tick(1);
+  store.sweep();
+  assert.equal(store.size, 0); // 24 h after issue: the number is free again
 });
 
 test('redeem of unknown code reports not-found', () => {
@@ -171,12 +224,14 @@ test('mint returns null when at capacity', () => {
   assert.equal(store.mint('defito://b', 1000), null);
 });
 
-test('sweep frees capacity taken by rows past retention', () => {
+test('capacity counts every code issued in the last 24 h', () => {
   const clock = fixedClock();
   const store = memStore(clock, 1);
   assert.ok(store.mint('defito://a', clock.now()));
   clock.tick(RETAIN);
-  // mint() sweeps first, so the retained-then-expired entry is reclaimed.
+  assert.equal(store.mint('defito://b', clock.now()), null); // still reserved
+  clock.tick(CODE_REUSE_SECONDS - RETAIN);
+  // mint() purges first, so the 24-h-old reservation is reclaimed.
   assert.ok(store.mint('defito://b', clock.now()));
   assert.equal(store.size, 1);
 });
@@ -214,9 +269,9 @@ test('RotatingCodeStore switches files at the UTC day boundary', () => {
     const unused = store.mint('defito://unused', clock.now());
     assert.ok(minted && unused);
     assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
-    // Next UTC day → a fresh, empty file; yesterday's code is unreachable
-    // (current-day-only, by design). The redeem is the op that triggers the
-    // lazy rotation; `size` then reflects the new (empty) file.
+    // Exactly 24 h later, on the next UTC day: the codes' reuse window has just
+    // closed, so nothing is carried over and the new file starts empty. The
+    // redeem is the op that triggers the lazy rotation.
     clock.tick(86_400);
     assert.notEqual(dailyDbPath(base, clock.now()), day1);
     assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
@@ -245,62 +300,109 @@ test('codes persist across a restart (reopen the same file)', () => {
   });
 });
 
-/** Every audit row, oldest first, read straight from the file (store closed). */
-function eventsOnDisk(path: string): Record<string, unknown>[] {
-  const db = new DatabaseSync(path);
-  const rows = db
-    .prepare('SELECT ts, event, pubkey, request_event, code, uri, valid_until, detail FROM events ORDER BY id')
-    .all() as Record<string, unknown>[];
-  db.close();
-  return rows.map((r) => ({ ...r })); // sqlite rows are null-prototype objects
-}
+// 2023-11-14T23:59:30Z: thirty seconds before a UTC day boundary.
+const BEFORE_MIDNIGHT = 1_700_006_370;
 
-const MERCHANT = 'a'.repeat(64);
-const CUSTOMER = 'b'.repeat(64);
-
-test('audit rows keep the full invoice for good, past use, sweep and close', () => {
-  withTempDb('audit', (path) => {
-    const clock = fixedClock();
-    const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
-    const uri = 'defito://base/0xabc&amount=USDT:1&order_id=o1&valid_until=1795219200&nostr=npub1x';
-    const minted = store.mint(uri, clock.now());
-    assert.ok(minted);
-    store.record({ event: 'mint', pubkey: MERCHANT, requestEvent: 'req1', code: minted.code, uri });
-    clock.tick(30);
-    const redeemed = store.redeem(minted.code);
-    assert.ok(redeemed.ok);
-    store.record({ event: 'redeem', pubkey: CUSTOMER, requestEvent: 'req2', code: minted.code, uri: redeemed.uri });
-    store.record({ event: 'redeem_expired', pubkey: CUSTOMER, requestEvent: 'req3', code: minted.code });
-    // Past retention: the code row is purged, the history is not.
-    clock.tick(RETAIN);
-    store.sweep();
-    assert.equal(store.size, 0);
-    store.close();
-
-    assert.deepEqual(eventsOnDisk(path), [
-      { ts: 1000, event: 'mint', pubkey: MERCHANT, request_event: 'req1', code: minted.code, uri, valid_until: 1795219200, detail: null },
-      { ts: 1030, event: 'redeem', pubkey: CUSTOMER, request_event: 'req2', code: minted.code, uri, valid_until: 1795219200, detail: null },
-      { ts: 1030, event: 'redeem_expired', pubkey: CUSTOMER, request_event: 'req3', code: minted.code, uri: null, valid_until: null, detail: null },
-    ]);
-  });
-});
-
-test('audit rows land in the file of the day they happen and survive rotation', () => {
-  const clock = fixedClock(1_700_000_000);
-  const base = join(tmpdir(), `regby-audit-rot-${process.pid}.db`);
+test('a code minted just before midnight still redeems after it, once', () => {
+  const clock = fixedClock(BEFORE_MIDNIGHT);
+  const base = join(tmpdir(), `regby-carry-${process.pid}.db`);
   const day1 = dailyDbPath(base, clock.now());
   try {
     const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
-    const uri = 'defito://base/0xabc&amount=USDT:1&order_id=o1&valid_until=1795219200&nostr=npub1x';
-    store.record({ event: 'mint', pubkey: MERCHANT, requestEvent: 'req1', code: '12345678', uri });
-    clock.tick(86_400);
-    store.record({ event: 'redeem_not_found', pubkey: CUSTOMER, requestEvent: 'req2', code: '12345678' });
+    const minted = store.mint('defito://base/0xabc', clock.now());
+    assert.ok(minted);
+    clock.tick(40); // 00:00:10 next day, still inside the code's minute
+    assert.notEqual(dailyDbPath(base, clock.now()), day1);
+    assert.deepEqual(store.redeem(minted.code), { ok: true, uri: 'defito://base/0xabc' });
+    assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
     store.close();
-    // retire() wiped the codes table on the roll; the archived history kept its invoice.
-    assert.deepEqual(eventsOnDisk(day1).map((r) => [r.event, r.uri]), [['mint', uri]]);
-    assert.deepEqual(eventsOnDisk(dailyDbPath(base, clock.now())).map((r) => r.event), ['redeem_not_found']);
+    // The archived file kept no invoice; the live copy crossed over.
+    assert.deepEqual([...urisOnDisk(day1).values()], ['']);
   } finally {
     rmDb(day1);
+    rmDb(dailyDbPath(base, clock.now()));
+  }
+});
+
+test('a restart on a new day carries yesterday\'s reservations, then frees them at 24 h', () => {
+  const clock = fixedClock(BEFORE_MIDNIGHT);
+  const base = join(tmpdir(), `regby-carry-restart-${process.pid}.db`);
+  const day1 = dailyDbPath(base, clock.now());
+  try {
+    const first = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
+    const minted = first.mint('defito://base/0xabc', clock.now());
+    assert.ok(minted);
+    first.close();
+
+    clock.tick(2 * 3600); // server comes back two hours later, on the next day
+    const second = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
+    assert.equal(second.size, 1); // the number is still reserved in today's file
+    assert.deepEqual(second.redeem(minted.code), { ok: false, reason: 'not-found' });
+    clock.tick(CODE_REUSE_SECONDS - 2 * 3600);
+    second.sweep();
+    assert.equal(second.size, 0);
+    second.close();
+  } finally {
+    rmDb(day1);
+    rmDb(dailyDbPath(base, BEFORE_MIDNIGHT + 2 * 3600));
+    rmDb(dailyDbPath(base, clock.now()));
+  }
+});
+
+test('a startup carry from a pre-redeemed_at file keeps its codes and wipes the source', () => {
+  const clock = fixedClock(BEFORE_MIDNIGHT);
+  const base = join(tmpdir(), `regby-carry-legacy-${process.pid}.db`);
+  const day1 = dailyDbPath(base, clock.now());
+  try {
+    // Yesterday's file, written by the old build and never retired (the server
+    // was down across midnight), still holding a live invoice.
+    mkdirSync(dirname(day1), { recursive: true });
+    const old = new DatabaseSync(day1);
+    const at = clock.now();
+    old.exec(`
+      CREATE TABLE codes (
+        code TEXT PRIMARY KEY, uri TEXT NOT NULL, created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL, retain_until INTEGER NOT NULL
+      );
+      INSERT INTO codes VALUES ('12345678', 'defito://old', ${at}, ${at + TTL}, ${at + RETAIN});
+    `);
+    old.close();
+
+    clock.tick(40); // 00:00:10 next day, still inside the code's minute
+    const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
+    assert.equal(urisOnDisk(day1).get('12345678'), '');
+    assert.deepEqual(store.redeem('12345678'), { ok: true, uri: 'defito://old' });
+    assert.deepEqual(store.redeem('12345678'), { ok: false, reason: 'redeemed' });
+    store.close();
+  } finally {
+    rmDb(day1);
+    rmDb(dailyDbPath(base, clock.now()));
+  }
+});
+
+test('a startup after several midnights wipes every older archive, not only yesterday\'s', () => {
+  const clock = fixedClock(BEFORE_MIDNIGHT);
+  const base = join(tmpdir(), `regby-scrub-${process.pid}.db`);
+  const day1 = dailyDbPath(base, clock.now());
+  const day2 = dailyDbPath(base, clock.now() + CODE_REUSE_SECONDS);
+  try {
+    // Two days, each shut down holding a live invoice that no roll ever retired.
+    for (const path of [day1, day2]) {
+      const day = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+      assert.ok(day.mint('defito://left', clock.now()));
+      day.close();
+      clock.tick(CODE_REUSE_SECONDS);
+    }
+    assert.deepEqual([...urisOnDisk(day1).values()], ['defito://left']);
+
+    clock.tick(CODE_REUSE_SECONDS); // back three days after day1, past yesterday's carry
+    const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
+    store.close();
+    assert.deepEqual([...urisOnDisk(day1).values()], ['']);
+    assert.deepEqual([...urisOnDisk(day2).values()], ['']);
+  } finally {
+    rmDb(day1);
+    rmDb(day2);
     rmDb(dailyDbPath(base, clock.now()));
   }
 });

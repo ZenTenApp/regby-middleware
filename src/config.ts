@@ -5,6 +5,10 @@
 import 'dotenv/config';
 import { getPublicKey } from 'nostr-tools/pure';
 import { hexToBytes } from 'nostr-tools/utils';
+import { CODE_REUSE_SECONDS } from './store.ts';
+import { intEnv, optional, required } from './env.ts';
+import { loadAuditToken } from './audit.ts';
+import type { AuditConfig } from './audit-sender.ts';
 
 export interface Config {
   /** 32-byte middleman secret key. */
@@ -14,7 +18,8 @@ export interface Config {
   relays: string[];
   /** Code validity window (anchored to the request's created_at). */
   codeTtlSeconds: number;
-  /** How long an expired code row is kept (redeem → `Code Expired`) before purge. */
+  /** How long a lapsed code still answers `Code Expired` / `Code Already Redeemed`.
+   * The row itself is kept 24 h (`CODE_REUSE_SECONDS`) so its number is not reused. */
   codeRetainSeconds: number;
   /** Base SQLite path; a per-UTC-day file (`regby-YYYY-MM-DD.db`) is derived from it. */
   dbPath: string;
@@ -28,39 +33,53 @@ export interface Config {
    * enumeration by an attacker who rotates through cheap, fresh pubkeys. */
   redeemRateMax: number;
   redeemRateWindowSeconds: number;
+  /** Global (all-sender) cap on mints per window. Each mint holds a store row
+   * for 24 h, so without it fresh pubkeys could fill `storeMax` and leave every
+   * merchant on "Service Busy" for a day after the flood stops. */
+  mintRateMax: number;
+  mintRateWindowSeconds: number;
   /** Not-found redeems from one sender within the window before it's blacklisted
    * as a code-guesser (expired redeems don't count - those are real lapsed codes). */
   redeemFailMax: number;
   storeMax: number;
   /** How long a malicious-request sender stays blacklisted (seconds). */
   blacklistSeconds: number;
+  /** External audit sink (see `audit-sender.ts`); null disables the audit. */
+  audit: AuditConfig | null;
   logLevel: string | undefined;
 }
 
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value || value.trim().length === 0) {
-    throw new Error(`Missing required env var ${name}`);
-  }
-  return value.trim();
-}
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
-function intEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new Error(`Env var ${name} must be a positive integer, got "${raw}"`);
+/**
+ * The token and full invoices ride this connection, so plain http is allowed
+ * only to this machine (a local TLS-terminating tunnel, or a test sink).
+ */
+function loadAuditConfig(): AuditConfig | null {
+  const raw = optional('REGBY_AUDIT_URL');
+  if (raw === null) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`REGBY_AUDIT_URL is not a URL: "${raw}"`);
   }
-  return n;
+  const secure = url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname));
+  if (!secure) {
+    throw new Error('REGBY_AUDIT_URL must be https:// (http:// only to localhost)');
+  }
+  return {
+    url,
+    token: loadAuditToken(),
+    queueMax: intEnv('REGBY_AUDIT_QUEUE_MAX', 10_000),
+  };
 }
 
 const HEX64_RE = /^[0-9a-f]{64}$/i;
 
 /**
- * Hard ceiling the dedicated ReGBY DM relays (`wss://dm1.zentext.me`,
- * `wss://dm2.nostr.box`) put on
- * NIP-40 expiration: they drop any event stamped further out than 72h. Every
+ * Hard ceiling the dedicated ReGBY DM relays (`REGBY_RELAYS`) put on NIP-40
+ * expiration: they drop any event stamped further out than 72h. Every
  * reply we publish carries `eventExpirySeconds`, so a value above this would
  * silently get every reply bounced. Fail loud at boot instead.
  */
@@ -99,10 +118,37 @@ export function loadConfig(): Config {
     );
   }
 
-  const codeTtlSeconds = intEnv('REGBY_CODE_TTL_SECONDS', 120);
+  const codeTtlSeconds = intEnv('REGBY_CODE_TTL_SECONDS', 60);
   const codeRetainSeconds = intEnv('REGBY_CODE_RETAIN_SECONDS', 3600);
   if (codeRetainSeconds < codeTtlSeconds) {
     throw new Error('REGBY_CODE_RETAIN_SECONDS must be >= REGBY_CODE_TTL_SECONDS');
+  }
+  // A stale stamp is clamped to `now - skew`, so a skew at or past the TTL
+  // anchors the code at or before its own expiry: mint refuses it and the
+  // merchant is told "Service Busy" on every retry, since the next request is
+  // just as stale.
+  const clockSkewSeconds = intEnv('REGBY_CLOCK_SKEW_SECONDS', 30);
+  if (clockSkewSeconds >= codeTtlSeconds) {
+    throw new Error('REGBY_CLOCK_SKEW_SECONDS must be < REGBY_CODE_TTL_SECONDS');
+  }
+  // Rows are deleted, and not carried across midnight, once the 24 h reuse
+  // window ends. A stamp up to `skew` ahead of the server anchors the answer
+  // window that much later, so it must still close inside the reuse window.
+  if (codeRetainSeconds + clockSkewSeconds > CODE_REUSE_SECONDS) {
+    throw new Error(
+      `REGBY_CODE_RETAIN_SECONDS + REGBY_CLOCK_SKEW_SECONDS must be <= ${CODE_REUSE_SECONDS}`,
+    );
+  }
+
+  // A full day at the mint ceiling must fit the store (see `Config.mintRateMax`).
+  const storeMax = intEnv('REGBY_STORE_MAX', 1_000_000);
+  const mintRateMax = intEnv('REGBY_MINT_RATE_MAX', 300);
+  const mintRateWindowSeconds = intEnv('REGBY_MINT_RATE_WINDOW_SECONDS', 60);
+  const mintsPerDay = mintRateMax * Math.ceil(CODE_REUSE_SECONDS / mintRateWindowSeconds);
+  if (mintsPerDay > storeMax) {
+    throw new Error(
+      `REGBY_MINT_RATE_MAX admits up to ${mintsPerDay} codes per 24 h, over REGBY_STORE_MAX (${storeMax})`,
+    );
   }
 
   // Default is the relays' full 72h window less a one-minute clock-skew margin:
@@ -123,14 +169,17 @@ export function loadConfig(): Config {
     codeRetainSeconds,
     dbPath: process.env.REGBY_DB_PATH?.trim() || 'regby.db',
     eventExpirySeconds,
-    clockSkewSeconds: intEnv('REGBY_CLOCK_SKEW_SECONDS', 120),
+    clockSkewSeconds,
     rateMax: intEnv('REGBY_RATE_MAX', 30),
     rateWindowSeconds: intEnv('REGBY_RATE_WINDOW_SECONDS', 60),
     redeemRateMax: intEnv('REGBY_REDEEM_RATE_MAX', 300),
     redeemRateWindowSeconds: intEnv('REGBY_REDEEM_RATE_WINDOW_SECONDS', 60),
+    mintRateMax,
+    mintRateWindowSeconds,
     redeemFailMax: intEnv('REGBY_REDEEM_FAIL_MAX', 10),
-    storeMax: intEnv('REGBY_STORE_MAX', 10_000),
+    storeMax,
     blacklistSeconds: intEnv('REGBY_BLACKLIST_SECONDS', 86_400),
+    audit: loadAuditConfig(),
     logLevel: process.env.REGBY_LOG_LEVEL,
   };
 }

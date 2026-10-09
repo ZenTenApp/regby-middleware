@@ -62,6 +62,22 @@ const LINE_BREAK_RE = /\r\n|[\n\r\u2028\u2029]/;
 /** Codes are exactly eight decimal digits. */
 export const REGBY_CODE_RE = /^\d{8}$/;
 
+/**
+ * Decrypted content that is bytes, not text. NIP-04 decrypt decodes UTF-8
+ * leniently (nostr-tools' non-fatal `TextDecoder`), so encrypted bytes never
+ * fail: they arrive as a string with `U+FFFD` where a byte sequence was not
+ * valid UTF-8, and NULs and other C0 controls pass through. Either is treated
+ * as bytes. That also catches a wrong-key decrypt that happens to pass PKCS7
+ * padding (about 1 in 256), which used to read as non-`defito` text and earn
+ * `malicious`.
+ *
+ * The C0 range is `HIDDEN_CHARS_RE`'s minus the whitespace controls (tab, LF,
+ * VT, FF, CR), which are text that `trim` and the line splitter handle, plus
+ * `U+FFFD`. It applies to the RAW characters only: an escaped `%00` is text,
+ * and still earns `malformed` with a reply via the hostile-text screen.
+ */
+const BINARY_RE = /[\u0000-\u0008\u000E-\u001F\uFFFD]/;
+
 /** Upper bound on decrypted content we accept, measured TRIMMED as the app
  *  measures it (multi-line URIs included). Mirrors `MAX_REDEEMED_URI_CHARS` in
  *  the app's `utils/regby.ts`. */
@@ -75,7 +91,7 @@ export const MAX_CONTENT_LENGTH = 4096;
  * broken emitter long before it is an attack, and the trimmed bound is the one
  * that has to agree with the app.
  */
-const MAX_STORED_LENGTH = MAX_CONTENT_LENGTH * 2;
+export const MAX_STORED_LENGTH = MAX_CONTENT_LENGTH * 2;
 
 /**
  * Cap on the LINES of one payload. Mirrors `MAX_PAYLOAD_LINES` in the app's
@@ -101,6 +117,20 @@ export const REPLY_INTENT = {
   request_regby_content: 'regby_content',
 } as const satisfies Record<InboundIntent, string>;
 
+/**
+ * Every reason a failure reply can carry. The app shows only these exact
+ * strings (`sanitizeReGBYError`) and renders anything else as a generic
+ * fallback, so a new or reworded reason needs an app release before its text
+ * reaches a user. Pinned against the app's allowlist by the parity tests.
+ */
+export const REPLY_REASON = {
+  notFound: 'Code Not Found',
+  expired: 'Code Expired',
+  redeemed: 'Code Already Redeemed',
+  busy: 'Service Busy, Try Again',
+  invalid: 'Invalid Request',
+} as const;
+
 /** The two intents the middleman emits; a failure reuses the matching one. */
 export type OutboundIntent = (typeof REPLY_INTENT)[InboundIntent];
 
@@ -110,7 +140,7 @@ export type InboundMessage =
   | { intent: 'request_regby_content'; code: string };
 
 /**
- * Outcome of parsing decrypted inbound content. The three verdicts differ by
+ * Outcome of parsing decrypted inbound content. The verdicts differ by
  * what they cost the SENDER, so what separates them is evidence of intent.
  *  - `ok`        → a well-formed message to dispatch.
  *  - `malicious` → decrypt succeeded (a real, targeted message) but a
@@ -126,10 +156,16 @@ export type InboundMessage =
  *    lockout is the wrong answer to a merchant whose POS built a bad string.
  *  - `silent`    → junk we drop without a reply (empty/oversized, malformed
  *    code shape, or an outbound intent echoed back at us).
+ *  - `binary`    → the decrypted content is bytes, not text (an image, a file,
+ *    a wrong encoding). Dropped like `silent`, before any other screen, so
+ *    bytes never reach validation, storage or the audit trail; kept as its own
+ *    verdict so operators can see it in the log. It wins over `malicious`: a
+ *    foreign scheme carrying bytes is dropped, not blacklisted, because bytes
+ *    are not evidence the sender meant to aim a payload at us.
  */
 export type ParseResult =
   | { ok: true; message: InboundMessage }
-  | { ok: false; reason: 'malicious' | 'malformed' | 'silent' };
+  | { ok: false; reason: 'malicious' | 'malformed' | 'silent' | 'binary' };
 
 /**
  * Read the inbound intent from an event's tags. Returns the first recognised
@@ -151,9 +187,13 @@ export function extractIntent(tags: string[][]): InboundIntent | null {
  * payload is not `defito://` is `malicious` (see ParseResult) so the caller can
  * blacklist the sender; one that IS `defito://` but that the wallet would
  * refuse at redeem is `malformed` and is NOT blacklisted; a malformed code
- * shape is dropped `silent`.
+ * shape is dropped `silent`. Decrypted bytes are dropped `binary` before any of
+ * that.
  */
 export function parseInbound(intent: InboundIntent, content: string): ParseResult {
+  // Raw, not trimmed: trim strips only whitespace, which BINARY_RE excludes,
+  // and the raw string is what we would store.
+  if (BINARY_RE.test(content)) return { ok: false, reason: 'binary' };
   // Every judgement below is made on the TRIMMED payload, because that is the
   // string the wallet judges (`sanitizeRedeemedUri` trims before it screens or
   // measures). Screening the untrimmed one refused payloads the wallet takes:
@@ -294,7 +334,6 @@ function lineWouldRedeem(line: string): boolean {
 /**
  * A `defito://` line split into its `<networks>/<recipients>` path and its
  * parameter tail, or null when it is another scheme or carries no parameters.
- * The prefix check matters for the audit, which reads refused payloads too.
  * The canonical separator is `&`; `?` on the first param is also accepted.
  */
 function splitLine(line: string): { path: string; tail: string } | null {
