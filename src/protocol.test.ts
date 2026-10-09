@@ -8,6 +8,7 @@ import {
   isValidPaymentUri,
   DEFITO_PREFIX,
   MAX_PAYLOAD_LINES,
+  REPLY_REASON,
 } from './protocol.ts';
 
 test('extractIntent reads a known i tag', () => {
@@ -440,4 +441,70 @@ test('a percent-encoded valid_until is read decoded, like every other value', ()
     ok: false,
     reason: 'malformed',
   });
+});
+
+// What NIP-04 decrypt hands us for encrypted BYTES: nostr-tools decodes the
+// plaintext with a non-fatal UTF-8 decoder, so bytes arrive as a string.
+function asDecrypted(bytes: readonly number[]): string {
+  return new TextDecoder().decode(Uint8Array.from(bytes));
+}
+const PNG_HEADER = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d];
+
+test('binary content is dropped before any other screen, on both intents', () => {
+  const png = asDecrypted(PNG_HEADER);
+  assert.deepEqual(parseInbound('request_regby_code', png), { ok: false, reason: 'binary' });
+  assert.deepEqual(parseInbound('request_regby_content', png), { ok: false, reason: 'binary' });
+  // Bytes behind a valid-looking invoice are still bytes: no reply, no audit.
+  assert.deepEqual(parseInbound('request_regby_code', `${GOOD}&x=\u0000\u0001`), {
+    ok: false,
+    reason: 'binary',
+  });
+  // An invalid UTF-8 byte inside a value surfaces as U+FFFD.
+  const withBadByte = GOOD + asDecrypted([0x26, 0x78, 0x3d, 0xc3, 0x28]); // "&x=" + broken 2-byte seq
+  assert.ok(withBadByte.includes('\uFFFD'));
+  assert.deepEqual(parseInbound('request_regby_code', withBadByte), { ok: false, reason: 'binary' });
+  assert.deepEqual(parseInbound('request_regby_content', '4289\u00001337'), {
+    ok: false,
+    reason: 'binary',
+  });
+  // Precedence over the blacklist: a foreign scheme carrying bytes is dropped,
+  // not punished as `malicious`.
+  assert.deepEqual(parseInbound('request_regby_code', 'javascript:x\u0000'), {
+    ok: false,
+    reason: 'binary',
+  });
+});
+
+test('real text is never read as binary', () => {
+  // Each case pins its full verdict, so a text screen that starts refusing
+  // real merchant input fails here too, not only a binary misread.
+  const cases: readonly { text: string; ok: boolean }[] = [
+    // Whitespace controls are text: line breaks split rails, trim takes the rest.
+    { text: `${GOOD}\r\n${GOOD}\t\u000B\u000C`, ok: true },
+    // Non-ASCII text is valid UTF-8, not bytes.
+    { text: `${GOOD}&message=caf\u00e9 \u2615`, ok: true },
+    // An ESCAPED NUL is text: it still earns `malformed` and a reply.
+    { text: `${GOOD}&x=%00`, ok: false },
+  ];
+  for (const { text, ok } of cases) {
+    const result = parseInbound('request_regby_code', text);
+    if (ok) assert.equal(result.ok, true, JSON.stringify(text));
+    else assert.deepEqual(result, { ok: false, reason: 'malformed' }, JSON.stringify(text));
+  }
+});
+
+// Cross-repo parity for failure-reply text: the same list, in the same order,
+// as `APP_REASONS` in the app's `__tests__/protocol-parity.test.ts`. A reason
+// this server sends that the app does not list renders there as a generic
+// error - which is how a renamed reason once nearly shipped unreadable.
+const PARITY_REPLY_REASONS: readonly string[] = [
+  'Code Not Found',
+  'Code Expired',
+  'Code Already Redeemed',
+  'Service Busy, Try Again',
+  'Invalid Request',
+];
+
+test('parity: every failure reason this server sends is on the app allowlist', () => {
+  assert.deepEqual(Object.values(REPLY_REASON), PARITY_REPLY_REASONS);
 });

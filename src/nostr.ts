@@ -21,7 +21,7 @@ import WebSocket from 'ws';
 import { REGBY_KIND, INTENT_TAG, INBOUND_INTENTS, type OutboundIntent } from './protocol.ts';
 import { DeletionQueue } from './deletion-queue.ts';
 import { nowSeconds } from './time.ts';
-import { logger } from './logger.ts';
+import { errorMessage, logger } from './logger.ts';
 
 /** NIP-09 deletion request kind. */
 const DELETION_KIND = 5;
@@ -74,7 +74,7 @@ function collectRejections(
 ): { relay: string; reason: string }[] {
   return results.flatMap((r, i) =>
     r.status === 'rejected'
-      ? [{ relay: relays[i] ?? 'unknown', reason: r.reason instanceof Error ? r.reason.message : String(r.reason) }]
+      ? [{ relay: relays[i] ?? 'unknown', reason: errorMessage(r.reason) }]
       : [],
   );
 }
@@ -196,7 +196,7 @@ export function createTransport(
     // An auth failure is not fatal here: publish anyway and let the relay's
     // own refusal be the reason we report.
     await authenticateRelay(url).catch((err: unknown) => {
-      logger.warn('Relay AUTH failed', { relay: url, reason: err instanceof Error ? err.message : String(err) });
+      logger.warn('Relay AUTH failed', { relay: url, reason: errorMessage(err) });
     });
     const [attempt] = pool.publish([url], event, { onauth });
     if (!attempt) throw new Error('no publish attempt');

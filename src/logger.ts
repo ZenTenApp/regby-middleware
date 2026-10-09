@@ -26,6 +26,11 @@ function emit(level: Level, msg: string, fields?: Record<string, unknown>): void
   out.write(JSON.stringify(line) + '\n');
 }
 
+/** A thrown value as loggable text; `catch` hands back `unknown`, not `Error`. */
+export function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export const logger = {
   error: (msg: string, fields?: Record<string, unknown>) => emit('error', msg, fields),
   warn: (msg: string, fields?: Record<string, unknown>) => emit('warn', msg, fields),

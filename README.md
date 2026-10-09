@@ -53,7 +53,7 @@ comes from the event signature alone, never from a successful decrypt.
 - **request_regby_code** → validate every line is a `defito://` invoice, mint a
   unique 8-digit code, store
   `code → { uri, expiresAt, retainUntil }`, reply `i:regby_code` with the requester's
-  event id in `e`. **Code validity (2 min) is anchored to the request
+  event id in `e`. **Code validity (1 min) is anchored to the request
   event's `created_at`**, not server receive-time, so the merchant POS and the
   server count down from the same origin - the merchant already knows that
   timestamp (it signed the event), so no echo is needed. `created_at` is
@@ -66,7 +66,11 @@ comes from the event signature alone, never from a successful decrypt.
   A `defito://` payload the **wallet would refuse at redeem** gets the same
   reply and **no blacklist**: that is a broken client, and a day-long lockout
   would make a POS bug look like an outage. Undecryptable noise and malformed
-  codes are still dropped silently.
+  codes are still dropped silently, and so is **binary content**: NIP-04
+  decrypt decodes UTF-8 leniently, so encrypted bytes (an image, a file) arrive
+  as text carrying `U+FFFD` or NUL/control characters. Any of those, other
+  than tab and line breaks, drops the event before every other screen, with no
+  reply and nothing stored (logged as `Binary content - dropping`).
 - What earns that softer refusal is exactly what the wallet screens, mirrored
   field for field: a missing `<networks>/<recipients>`, `amount=`, `order_id=`
   or decodable `nostr=<npub>`; a missing or malformed `valid_until=` (unix
@@ -96,25 +100,35 @@ comes from the event signature alone, never from a successful decrypt.
   untrusted and nothing it approves is a safety guarantee.
 - **request_regby_content** → look up the code. Valid → reply `i:regby_content` with the URI.
   **Single-use**: the first successful redeem consumes the code and wipes its
-  URI. A code expires after 2 min or its first use, whichever comes first; the
+  URI. A code expires after 1 min or its first use, whichever comes first; the
   60s sweep wipes the URI of lapsed codes and checkpoints the WAL so no copy
   lingers there; shutdown wipes lapsed ones too, and day rotation wipes every
   URI left in the outgoing file. Consume happens before the reply is
   published, so a reply no relay accepted still burns the code (logged as a
-  warning); the merchant re-mints. Expired but still **retained** (within 1 h of its
-  `created_at`) → `i:regby_content` `Code Expired`; never minted or past retention →
-  `i:regby_content` `Code Not Found` (reason in `content`, not a URI).
+  warning); the merchant re-mints. While the row is **retained** (within 1 h of
+  the merchant's request): already redeemed → `i:regby_content` `Code Already Redeemed`
+  (inside its 1-min validity or past it, the row's `redeemed_at` says so);
+  lapsed and never redeemed → `Code Expired`. Never minted or past retention →
+  `Code Not Found` (reason in `content`, not a URI).
 - **Persistence**: the code store is **SQLite** (`node:sqlite`, file derived from
   `REGBY_DB_PATH`), so codes survive a restart - a reboot no longer makes every
-  code `Code Not Found`. Each row carries `created_at` (wall-clock mint, audit
-  only), `expires_at` (validity) and `retain_until`
-  (`created_at + REGBY_CODE_RETAIN_SECONDS`); rows past retention are swept on a
-  60s timer (also stale rate buckets + blacklist entries).
+  code `Code Not Found`. Each row carries `created_at` (wall-clock mint),
+  `expires_at` (validity), `retain_until` (answer window,
+  `REGBY_CODE_RETAIN_SECONDS`, after which redeem says `Code Not Found`) and
+  `redeemed_at`.
+- **No code reuse for 24 h**: a row is deleted only 24 h after its
+  `created_at`, so its number cannot be issued again before then, even across
+  midnight or a restart. A customer holding an old code can never open someone
+  else's invoice with it. Fixed, not configurable. Rows past 24 h are swept on
+  a 60s timer (also stale rate buckets + blacklist entries).
 - **Daily rotation**: a new SQLite file is opened per **UTC day**
   (nested `YYYY/MM/regby-YYYY-MM-DD.db` derived from `REGBY_DB_PATH`), switched at 00:00 UTC; old
-  files are kept on disk as a daily archive. Only the current day's file is read
-  or written - a code minted just before midnight is unreachable after the roll
-  even within its retention window (a deliberate current-day-only trade).
+  files are kept on disk as a daily archive. Only the current day's file is
+  read or written, but opening it (at the roll, or on startup) copies in the
+  previous day's codes from the last 24 h, so midnight neither frees their
+  numbers nor cuts short a code minted at 23:59. Archived files keep no
+  invoices: the roll wipes the file it leaves, and startup wipes every older
+  file, so a server down across several midnights leaves none behind either.
 - **Active deletion**: once a reply's `expiration` lapses, the server publishes a
   **NIP-09 `kind 5`** deletion for its own reply events (batched). NIP-40
   expiration is advisory - many relays ignore it - so we delete actively. Only the
@@ -122,12 +136,12 @@ comes from the event signature alone, never from a successful decrypt.
   The deletion queue is in-memory, so it covers replies from the current process
   lifetime; older replies fall back to NIP-40 relay expiry. (There is no boot wipe
   of own events anymore - codes persist, so prior replies aren't orphaned.) NB: on
-  the dedicated `wss://dm1.zentext.me` / `wss://dm2.nostr.box` relays (kind 4
+  the dedicated DM relays (`REGBY_RELAYS`, kind 4
   ONLY), these kind-5 deletions
   are rejected, so active deletion no-ops there - retention then rests entirely on
   the NIP-40 `expiration` tag, which those relays enforce (and cap at 72h).
-- **Dedicated DM relays**: ReGBY runs on `wss://dm1.zentext.me` and
-  `wss://dm2.nostr.box` - operator-run,
+- **Dedicated DM relays**: ReGBY runs on `wss://dm1.zentext.me`,
+  `wss://dm2.nostr.box` and `wss://dm3.npub.cx` - operator-run,
   ReGBY-only, kind 4 ONLY, NIP-40 expiration capped at 72h, content capped at
   4 KB. `REGBY_RELAYS` must match the app's `config/nostr.ts → REGBY_RELAYS`.
 - **Subscription keep-alive**: a single long-lived REQ goes deaf when a relay
@@ -139,13 +153,16 @@ comes from the event signature alone, never from a successful decrypt.
 ### Safeguards
 
 - Per-sender sliding-window rate limit (`REGBY_RATE_MAX` / window).
+- Global mint rate ceiling (`REGBY_MINT_RATE_MAX`), sized so a full day of it
+  fits `REGBY_STORE_MAX`: a flood from fresh pubkeys can't fill the store and
+  leave merchants on `Service Busy` for the 24 h its rows are held.
 - Global redeem rate ceiling (`REGBY_REDEEM_RATE_MAX`) plus per-sender
   not-found strikes (`REGBY_REDEEM_FAIL_MAX` → blacklist): bounds code-space
   enumeration / URI harvesting even by an attacker rotating fresh pubkeys.
 - 24 h blacklist for senders that submit a malicious `request_regby_code`.
 - Code-TTL anchor (`created_at`) skew-clamped so expiry can't be gamed.
-- Store capacity cap (`REGBY_STORE_MAX`) - mints past it reply `i:regby_code` with
-  `Service Busy, Try Again` (a reason, not a code).
+- Store capacity cap (`REGBY_STORE_MAX`, codes issued in any 24 h) - mints past
+  it reply `i:regby_code` with `Service Busy, Try Again` (a reason, not a code).
 - Processed event ids are remembered so a relay re-delivery can't double-mint.
 - Strict content validation; length caps.
 - Decrypted URIs / live codes are logged only at `debug`.
@@ -221,7 +238,7 @@ before `docker compose up` recreates it.
 | `src/protocol.ts`   | intent/tag + raw-content validation (mirrors app) |
 | `src/config.ts`     | env loading, key decode, pubkey derivation        |
 | `src/nostr.ts`      | relay pool, NIP-04 encrypt/decrypt, publish       |
-| `src/store.ts`      | SQLite code → URI store (2-min validity, single-use, 1-h retention) + per-UTC-day file rotation |
+| `src/store.ts`      | SQLite code → URI store (1-min validity, single-use, 1-h retention) + per-UTC-day file rotation |
 | `src/rate-limit.ts` | per-pubkey sliding window                         |
 | `src/blacklist.ts`  | 24h block list for malicious senders              |
 | `src/deletion-queue.ts` | tracks own reply ids → due NIP-09 deletions   |
