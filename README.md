@@ -66,7 +66,11 @@ comes from the event signature alone, never from a successful decrypt.
   A `defito://` payload the **wallet would refuse at redeem** gets the same
   reply and **no blacklist**: that is a broken client, and a day-long lockout
   would make a POS bug look like an outage. Undecryptable noise and malformed
-  codes are still dropped silently.
+  codes are still dropped silently, and so is **binary content**: NIP-04
+  decrypt decodes UTF-8 leniently, so encrypted bytes (an image, a file) arrive
+  as text carrying `U+FFFD` or NUL/control characters. Any of those, other
+  than tab and line breaks, drops the event before every other screen, with no
+  reply and nothing stored (logged as `Binary content - dropping`).
 - What earns that softer refusal is exactly what the wallet screens, mirrored
   field for field: a missing `<networks>/<recipients>`, `amount=`, `order_id=`
   or decodable `nostr=<npub>`; a missing or malformed `valid_until=` (unix

@@ -125,6 +125,16 @@ export class ReGBYBroker {
     const target: ReplyTarget = { recipientPubkey: event.pubkey, requestEventId: event.id };
     const parsed = parseInbound(intent, plaintext);
     if (!parsed.ok) {
+      if (parsed.reason === 'binary') {
+        // Bytes, not text: no reply, nothing stored. Info, not warn: any
+        // signer can send bytes, and a flood must not drown the warn log.
+        logger.info('Binary content - dropping', {
+          id: event.id.slice(0, 12),
+          from: event.pubkey.slice(0, 12),
+          intent,
+        });
+        return;
+      }
       if (parsed.reason === 'silent') {
         logger.debug('Unusable content - dropping', { id: event.id.slice(0, 12), intent });
         return;
