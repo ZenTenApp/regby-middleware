@@ -38,10 +38,10 @@
  */
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { randomInt } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
 import { nowSeconds } from './time.ts';
-import { logger } from './logger.ts';
+import { errorMessage, logger } from './logger.ts';
 
 export interface MintResult {
   code: string;
@@ -231,11 +231,10 @@ export class CodeStore implements CodeStoreLike {
 
   /**
    * Copy the rows issued in the last 24 h from another day's file, as they
-   * stand (invoice, expiry, redeemed state), then wipe every invoice left in
-   * that file. Run when a new day's file opens, so midnight neither frees those
-   * numbers for reuse nor cuts short a code still inside its minute. The wipe
-   * matters on startup: a server down across midnight never retired yesterday's
-   * file, and the archive must not keep the invoices it carried out of it.
+   * stand (invoice, expiry, redeemed state). Run when a new day's file opens,
+   * so midnight neither frees those numbers for reuse nor cuts short a code
+   * still inside its minute. The source keeps its invoices until the caller
+   * wipes it: `retire` on rotation, `scrubArchives` on startup.
    * Idempotent: rows already here are left alone.
    */
   carryFrom(path: string): void {
@@ -253,8 +252,6 @@ export class CodeStore implements CodeStoreLike {
            FROM prev.codes WHERE created_at > ?`,
         )
         .run(this.now() - CODE_REUSE_SECONDS);
-      this.db.exec('PRAGMA prev.secure_delete = ON');
-      this.db.exec("UPDATE prev.codes SET uri = '' WHERE uri != ''");
     } finally {
       this.db.exec('DETACH DATABASE prev');
     }
@@ -293,6 +290,55 @@ export function dailyDbPath(basePath: string, epochSeconds: number): string {
   return join(dir, year, month, file);
 }
 
+// Prune the walk to the YYYY/MM layout; `dailyDbPath` stays the authority on
+// which files inside it are ours.
+const YEAR_RE = /^\d{4}$/;
+const MONTH_RE = /^\d{2}$/;
+
+/** Folder names under `dir`, or none if it doesn't exist yet. */
+function subdirs(dir: string, pattern: RegExp): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && pattern.test(e.name))
+    .map((e) => e.name);
+}
+
+/** Every daily file `dailyDbPath` can derive from `basePath`, any date. */
+function dailyDbFiles(basePath: string): string[] {
+  const { dir, name, ext } = parse(basePath);
+  const root = dir || '.';
+  const files: string[] = [];
+  for (const year of subdirs(root, YEAR_RE)) {
+    for (const month of subdirs(join(root, year), MONTH_RE)) {
+      const monthDir = join(root, year, month);
+      for (const file of readdirSync(monthDir)) {
+        // Keep a file only if its date derives exactly this path back.
+        const day = file.slice(name.length + 1, file.length - ext.length);
+        const at = Date.parse(`${day}T00:00:00Z`) / 1000;
+        const path = join(monthDir, file);
+        if (Number.isFinite(at) && dailyDbPath(basePath, at) === path) files.push(path);
+      }
+    }
+  }
+  return files;
+}
+
+/**
+ * Wipe every invoice left in an archived daily file. Rotation and the startup
+ * carry clean the file they leave, but a server down across two or more
+ * midnights never touched the older ones, and nothing else ever would.
+ */
+function scrubArchive(path: string): void {
+  const db = new DatabaseSync(path);
+  try {
+    if (db.prepare('PRAGMA table_info(codes)').all().length === 0) return;
+    db.exec('PRAGMA secure_delete = ON');
+    db.exec("UPDATE codes SET uri = '' WHERE uri != ''");
+  } finally {
+    db.close();
+  }
+}
+
 /**
  * A `CodeStore` that writes to a fresh SQLite file each UTC day, nested under
  * `YYYY/MM/regby-<date>.db`, and switches at 00:00 UTC. Old files are KEPT on
@@ -318,8 +364,27 @@ export class RotatingCodeStore implements CodeStoreLike {
     private readonly basePath: string,
     private readonly now: () => number = nowSeconds,
   ) {
-    this.currentDay = utcDayKey(this.now());
+    const bootAt = this.now();
+    this.currentDay = utcDayKey(bootAt);
     this.current = this.openCurrent();
+    this.scrubArchives(dailyDbPath(this.basePath, bootAt));
+  }
+
+  /** Startup only: after the carry, no file but today's may hold an invoice. */
+  private scrubArchives(today: string): void {
+    for (const path of dailyDbFiles(this.basePath)) {
+      if (path === today) continue;
+      try {
+        scrubArchive(path);
+      } catch (err) {
+        // An unreadable archive must not keep the server down; the wipe is
+        // retried on the next start.
+        logger.error('Archive scrub failed', {
+          path,
+          error: errorMessage(err),
+        });
+      }
+    }
   }
 
   private openCurrent(): CodeStore {
@@ -354,7 +419,7 @@ export class RotatingCodeStore implements CodeStoreLike {
       // on the next op. Opening today's without the carry would free the last
       // 24 h of numbers for reuse.
       logger.error('Day rotation failed - staying on the previous file', {
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMessage(err),
       });
       return;
     }

@@ -30,6 +30,11 @@ export interface Config {
    * enumeration by an attacker who rotates through cheap, fresh pubkeys. */
   redeemRateMax: number;
   redeemRateWindowSeconds: number;
+  /** Global (all-sender) cap on mints per window. Each mint holds a store row
+   * for 24 h, so without it fresh pubkeys could fill `storeMax` and leave every
+   * merchant on "Service Busy" for a day after the flood stops. */
+  mintRateMax: number;
+  mintRateWindowSeconds: number;
   /** Not-found redeems from one sender within the window before it's blacklisted
    * as a code-guesser (expired redeems don't count - those are real lapsed codes). */
   redeemFailMax: number;
@@ -105,11 +110,6 @@ export function loadConfig(): Config {
   if (codeRetainSeconds < codeTtlSeconds) {
     throw new Error('REGBY_CODE_RETAIN_SECONDS must be >= REGBY_CODE_TTL_SECONDS');
   }
-  // Rows are deleted, and not carried across midnight, once the 24 h reuse
-  // window ends; an answer window past it would answer for rows already gone.
-  if (codeRetainSeconds > CODE_REUSE_SECONDS) {
-    throw new Error(`REGBY_CODE_RETAIN_SECONDS must be <= ${CODE_REUSE_SECONDS}`);
-  }
   // A stale stamp is clamped to `now - skew`, so a skew at or past the TTL
   // anchors the code at or before its own expiry: mint refuses it and the
   // merchant is told "Service Busy" on every retry, since the next request is
@@ -117,6 +117,25 @@ export function loadConfig(): Config {
   const clockSkewSeconds = intEnv('REGBY_CLOCK_SKEW_SECONDS', 30);
   if (clockSkewSeconds >= codeTtlSeconds) {
     throw new Error('REGBY_CLOCK_SKEW_SECONDS must be < REGBY_CODE_TTL_SECONDS');
+  }
+  // Rows are deleted, and not carried across midnight, once the 24 h reuse
+  // window ends. A stamp up to `skew` ahead of the server anchors the answer
+  // window that much later, so it must still close inside the reuse window.
+  if (codeRetainSeconds + clockSkewSeconds > CODE_REUSE_SECONDS) {
+    throw new Error(
+      `REGBY_CODE_RETAIN_SECONDS + REGBY_CLOCK_SKEW_SECONDS must be <= ${CODE_REUSE_SECONDS}`,
+    );
+  }
+
+  // A full day at the mint ceiling must fit the store (see `Config.mintRateMax`).
+  const storeMax = intEnv('REGBY_STORE_MAX', 1_000_000);
+  const mintRateMax = intEnv('REGBY_MINT_RATE_MAX', 300);
+  const mintRateWindowSeconds = intEnv('REGBY_MINT_RATE_WINDOW_SECONDS', 60);
+  const mintsPerDay = mintRateMax * Math.ceil(CODE_REUSE_SECONDS / mintRateWindowSeconds);
+  if (mintsPerDay > storeMax) {
+    throw new Error(
+      `REGBY_MINT_RATE_MAX admits up to ${mintsPerDay} codes per 24 h, over REGBY_STORE_MAX (${storeMax})`,
+    );
   }
 
   // Default is the relays' full 72h window less a one-minute clock-skew margin:
@@ -142,8 +161,10 @@ export function loadConfig(): Config {
     rateWindowSeconds: intEnv('REGBY_RATE_WINDOW_SECONDS', 60),
     redeemRateMax: intEnv('REGBY_REDEEM_RATE_MAX', 300),
     redeemRateWindowSeconds: intEnv('REGBY_REDEEM_RATE_WINDOW_SECONDS', 60),
+    mintRateMax,
+    mintRateWindowSeconds,
     redeemFailMax: intEnv('REGBY_REDEEM_FAIL_MAX', 10),
-    storeMax: intEnv('REGBY_STORE_MAX', 1_000_000),
+    storeMax,
     blacklistSeconds: intEnv('REGBY_BLACKLIST_SECONDS', 86_400),
     logLevel: process.env.REGBY_LOG_LEVEL,
   };

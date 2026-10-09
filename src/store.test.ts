@@ -379,3 +379,30 @@ test('a startup carry from a pre-redeemed_at file keeps its codes and wipes the 
     rmDb(dailyDbPath(base, clock.now()));
   }
 });
+
+test('a startup after several midnights wipes every older archive, not only yesterday\'s', () => {
+  const clock = fixedClock(BEFORE_MIDNIGHT);
+  const base = join(tmpdir(), `regby-scrub-${process.pid}.db`);
+  const day1 = dailyDbPath(base, clock.now());
+  const day2 = dailyDbPath(base, clock.now() + CODE_REUSE_SECONDS);
+  try {
+    // Two days, each shut down holding a live invoice that no roll ever retired.
+    for (const path of [day1, day2]) {
+      const day = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+      assert.ok(day.mint('defito://left', clock.now()));
+      day.close();
+      clock.tick(CODE_REUSE_SECONDS);
+    }
+    assert.deepEqual([...urisOnDisk(day1).values()], ['defito://left']);
+
+    clock.tick(CODE_REUSE_SECONDS); // back three days after day1, past yesterday's carry
+    const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
+    store.close();
+    assert.deepEqual([...urisOnDisk(day1).values()], ['']);
+    assert.deepEqual([...urisOnDisk(day2).values()], ['']);
+  } finally {
+    rmDb(day1);
+    rmDb(day2);
+    rmDb(dailyDbPath(base, clock.now()));
+  }
+});

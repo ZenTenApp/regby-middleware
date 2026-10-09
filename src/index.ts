@@ -3,7 +3,7 @@
  */
 import { resolve } from 'node:path';
 import { loadConfig } from './config.ts';
-import { configureLogger, logger } from './logger.ts';
+import { configureLogger, errorMessage, logger } from './logger.ts';
 import { ReGBYBroker } from './server.ts';
 
 function main(): void {
@@ -33,7 +33,6 @@ function main(): void {
 try {
   main();
 } catch (err) {
-  const message = err instanceof Error ? err.message : String(err);
-  logger.error('Fatal on boot', { message });
+  logger.error('Fatal on boot', { message: errorMessage(err) });
   process.exit(1);
 }

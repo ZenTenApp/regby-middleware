@@ -36,15 +36,16 @@ const REDEEM_FAILURE_REPLY: Record<RedeemFailureReason, string> = {
   'not-found': REPLY_REASON.notFound,
 };
 
-/** Single bucket key for the global (all-sender) redeem limiter. */
-const GLOBAL_REDEEM_KEY = 'all';
+/** Single bucket key for the global (all-sender) limiters. */
+const GLOBAL_KEY = 'all';
 
 export class ReGBYBroker {
   private readonly transport: ReGBYTransport;
   private readonly store: CodeStoreLike;
   private readonly limiter: RateLimiter;
-  // Aggregate redeem cap across every sender - a per-pubkey limit alone can't
-  // stop enumeration by an attacker who rotates through free, fresh pubkeys.
+  // Aggregate caps across every sender: a per-pubkey limit alone can't bind an
+  // attacker who rotates through free, fresh pubkeys (see `Config`).
+  private readonly mintLimiter: RateLimiter;
   private readonly redeemLimiter: RateLimiter;
   // Per-sender not-found redeem strikes; exceeding the cap blacklists a guesser.
   private readonly redeemFails: RateLimiter;
@@ -67,6 +68,7 @@ export class ReGBYBroker {
       config.dbPath,
     );
     this.limiter = new RateLimiter(config.rateMax, config.rateWindowSeconds);
+    this.mintLimiter = new RateLimiter(config.mintRateMax, config.mintRateWindowSeconds);
     this.redeemLimiter = new RateLimiter(config.redeemRateMax, config.redeemRateWindowSeconds);
     this.redeemFails = new RateLimiter(config.redeemFailMax, config.redeemRateWindowSeconds);
     this.blacklist = new Blacklist(config.blacklistSeconds);
@@ -82,9 +84,9 @@ export class ReGBYBroker {
     // Periodic store/limiter/blacklist hygiene + NIP-09 deletion of our replies.
     this.sweepTimer = setInterval(() => {
       this.store.sweep();
-      this.limiter.sweep();
-      this.redeemLimiter.sweep();
-      this.redeemFails.sweep();
+      for (const l of [this.limiter, this.mintLimiter, this.redeemLimiter, this.redeemFails]) {
+        l.sweep();
+      }
       this.blacklist.sweep();
       void this.transport.purgeExpired();
     }, 60_000);
@@ -198,6 +200,12 @@ export class ReGBYBroker {
   ): Promise<void> {
     const from = target.recipientPubkey.slice(0, 12);
     if (message.intent === 'request_regby_code') {
+      // No reply past the ceiling: answering would publish one event per
+      // flooded request, the very load the ceiling exists to stop.
+      if (!this.mintLimiter.allow(GLOBAL_KEY)) {
+        logger.warn('Global mint rate limit hit - dropping', { from });
+        return;
+      }
       const minted = this.store.mint(message.uri, this.clampStart(createdAt));
       if (!minted) {
         logger.warn('Mint failed (store full / no free code)', { size: this.store.size });
@@ -218,7 +226,7 @@ export class ReGBYBroker {
 
     // request_regby_content (redeem, single-use). A global ceiling bounds total
     // guess rate regardless of how many pubkeys an attacker rotates through.
-    if (!this.redeemLimiter.allow(GLOBAL_REDEEM_KEY)) {
+    if (!this.redeemLimiter.allow(GLOBAL_KEY)) {
       logger.warn('Global redeem rate limit hit - dropping', {
         from,
       });

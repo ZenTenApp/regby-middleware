@@ -476,21 +476,21 @@ test('binary content is dropped before any other screen, on both intents', () =>
 });
 
 test('real text is never read as binary', () => {
-  for (const text of [
+  // Each case pins its full verdict, so a text screen that starts refusing
+  // real merchant input fails here too, not only a binary misread.
+  const cases: readonly { text: string; ok: boolean }[] = [
     // Whitespace controls are text: line breaks split rails, trim takes the rest.
-    `${GOOD}\r\n${GOOD}\t\u000B\u000C`,
+    { text: `${GOOD}\r\n${GOOD}\t\u000B\u000C`, ok: true },
     // Non-ASCII text is valid UTF-8, not bytes.
-    `${GOOD}&message=caf\u00e9 \u2615`,
+    { text: `${GOOD}&message=caf\u00e9 \u2615`, ok: true },
     // An ESCAPED NUL is text: it still earns `malformed` and a reply.
-    `${GOOD}&x=%00`,
-  ]) {
+    { text: `${GOOD}&x=%00`, ok: false },
+  ];
+  for (const { text, ok } of cases) {
     const result = parseInbound('request_regby_code', text);
-    assert.ok(result.ok || result.reason !== 'binary', JSON.stringify(text));
+    if (ok) assert.equal(result.ok, true, JSON.stringify(text));
+    else assert.deepEqual(result, { ok: false, reason: 'malformed' }, JSON.stringify(text));
   }
-  assert.deepEqual(parseInbound('request_regby_code', `${GOOD}&x=%00`), {
-    ok: false,
-    reason: 'malformed',
-  });
 });
 
 // Cross-repo parity for failure-reply text: the same list, in the same order,

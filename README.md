@@ -126,7 +126,9 @@ comes from the event signature alone, never from a successful decrypt.
   files are kept on disk as a daily archive. Only the current day's file is
   read or written, but opening it (at the roll, or on startup) copies in the
   previous day's codes from the last 24 h, so midnight neither frees their
-  numbers nor cuts short a code minted at 23:59.
+  numbers nor cuts short a code minted at 23:59. Archived files keep no
+  invoices: the roll wipes the file it leaves, and startup wipes every older
+  file, so a server down across several midnights leaves none behind either.
 - **Active deletion**: once a reply's `expiration` lapses, the server publishes a
   **NIP-09 `kind 5`** deletion for its own reply events (batched). NIP-40
   expiration is advisory - many relays ignore it - so we delete actively. Only the
@@ -151,6 +153,9 @@ comes from the event signature alone, never from a successful decrypt.
 ### Safeguards
 
 - Per-sender sliding-window rate limit (`REGBY_RATE_MAX` / window).
+- Global mint rate ceiling (`REGBY_MINT_RATE_MAX`), sized so a full day of it
+  fits `REGBY_STORE_MAX`: a flood from fresh pubkeys can't fill the store and
+  leave merchants on `Service Busy` for the 24 h its rows are held.
 - Global redeem rate ceiling (`REGBY_REDEEM_RATE_MAX`) plus per-sender
   not-found strikes (`REGBY_REDEEM_FAIL_MAX` → blacklist): bounds code-space
   enumeration / URI harvesting even by an attacker rotating fresh pubkeys.
