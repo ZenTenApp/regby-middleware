@@ -105,20 +105,28 @@ comes from the event signature alone, never from a successful decrypt.
   lingers there; shutdown wipes lapsed ones too, and day rotation wipes every
   URI left in the outgoing file. Consume happens before the reply is
   published, so a reply no relay accepted still burns the code (logged as a
-  warning); the merchant re-mints. Expired but still **retained** (within 1 h of its
-  `created_at`) → `i:regby_content` `Code Expired`; never minted or past retention →
-  `i:regby_content` `Code Not Found` (reason in `content`, not a URI).
+  warning); the merchant re-mints. While the row is **retained** (within 1 h of
+  the merchant's request): already redeemed → `i:regby_content` `Code Already Redeemed`
+  (inside its 1-min validity or past it, the row's `redeemed_at` says so);
+  lapsed and never redeemed → `Code Expired`. Never minted or past retention →
+  `Code Not Found` (reason in `content`, not a URI).
 - **Persistence**: the code store is **SQLite** (`node:sqlite`, file derived from
   `REGBY_DB_PATH`), so codes survive a restart - a reboot no longer makes every
-  code `Code Not Found`. Each row carries `created_at` (wall-clock mint, audit
-  only), `expires_at` (validity) and `retain_until`
-  (`created_at + REGBY_CODE_RETAIN_SECONDS`); rows past retention are swept on a
-  60s timer (also stale rate buckets + blacklist entries).
+  code `Code Not Found`. Each row carries `created_at` (wall-clock mint),
+  `expires_at` (validity), `retain_until` (answer window,
+  `REGBY_CODE_RETAIN_SECONDS`, after which redeem says `Code Not Found`) and
+  `redeemed_at`.
+- **No code reuse for 24 h**: a row is deleted only 24 h after its
+  `created_at`, so its number cannot be issued again before then, even across
+  midnight or a restart. A customer holding an old code can never open someone
+  else's invoice with it. Fixed, not configurable. Rows past 24 h are swept on
+  a 60s timer (also stale rate buckets + blacklist entries).
 - **Daily rotation**: a new SQLite file is opened per **UTC day**
   (nested `YYYY/MM/regby-YYYY-MM-DD.db` derived from `REGBY_DB_PATH`), switched at 00:00 UTC; old
-  files are kept on disk as a daily archive. Only the current day's file is read
-  or written - a code minted just before midnight is unreachable after the roll
-  even within its retention window (a deliberate current-day-only trade).
+  files are kept on disk as a daily archive. Only the current day's file is
+  read or written, but opening it (at the roll, or on startup) copies in the
+  previous day's codes from the last 24 h, so midnight neither frees their
+  numbers nor cuts short a code minted at 23:59.
 - **Active deletion**: once a reply's `expiration` lapses, the server publishes a
   **NIP-09 `kind 5`** deletion for its own reply events (batched). NIP-40
   expiration is advisory - many relays ignore it - so we delete actively. Only the
@@ -126,12 +134,12 @@ comes from the event signature alone, never from a successful decrypt.
   The deletion queue is in-memory, so it covers replies from the current process
   lifetime; older replies fall back to NIP-40 relay expiry. (There is no boot wipe
   of own events anymore - codes persist, so prior replies aren't orphaned.) NB: on
-  the dedicated `wss://dm1.zentext.me` / `wss://dm2.nostr.box` relays (kind 4
+  the dedicated DM relays (`REGBY_RELAYS`, kind 4
   ONLY), these kind-5 deletions
   are rejected, so active deletion no-ops there - retention then rests entirely on
   the NIP-40 `expiration` tag, which those relays enforce (and cap at 72h).
-- **Dedicated DM relays**: ReGBY runs on `wss://dm1.zentext.me` and
-  `wss://dm2.nostr.box` - operator-run,
+- **Dedicated DM relays**: ReGBY runs on `wss://dm1.zentext.me`,
+  `wss://dm2.nostr.box` and `wss://dm3.npub.cx` - operator-run,
   ReGBY-only, kind 4 ONLY, NIP-40 expiration capped at 72h, content capped at
   4 KB. `REGBY_RELAYS` must match the app's `config/nostr.ts → REGBY_RELAYS`.
 - **Subscription keep-alive**: a single long-lived REQ goes deaf when a relay
@@ -148,8 +156,8 @@ comes from the event signature alone, never from a successful decrypt.
   enumeration / URI harvesting even by an attacker rotating fresh pubkeys.
 - 24 h blacklist for senders that submit a malicious `request_regby_code`.
 - Code-TTL anchor (`created_at`) skew-clamped so expiry can't be gamed.
-- Store capacity cap (`REGBY_STORE_MAX`) - mints past it reply `i:regby_code` with
-  `Service Busy, Try Again` (a reason, not a code).
+- Store capacity cap (`REGBY_STORE_MAX`, codes issued in any 24 h) - mints past
+  it reply `i:regby_code` with `Service Busy, Try Again` (a reason, not a code).
 - Processed event ids are remembered so a relay re-delivery can't double-mint.
 - Strict content validation; length caps.
 - Decrypted URIs / live codes are logged only at `debug`.

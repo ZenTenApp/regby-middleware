@@ -12,16 +12,29 @@
 import type { Event } from 'nostr-tools';
 import type { Config } from './config.ts';
 import { createTransport, type ReGBYTransport, type ReplyTarget } from './nostr.ts';
-import { RotatingCodeStore, type CodeStoreLike } from './store.ts';
+import { RotatingCodeStore, type CodeStoreLike, type RedeemFailureReason } from './store.ts';
 import { RateLimiter } from './rate-limit.ts';
 import { Blacklist } from './blacklist.ts';
 import { BoundedMap } from './bounded-map.ts';
 import { nowSeconds } from './time.ts';
-import { extractIntent, parseInbound, REPLY_INTENT, type InboundMessage } from './protocol.ts';
+import {
+  extractIntent,
+  parseInbound,
+  REPLY_INTENT,
+  REPLY_REASON,
+  type InboundMessage,
+} from './protocol.ts';
 import { logger } from './logger.ts';
 
 /** Remember processed event ids so a relay re-delivery can't double-mint. */
 const SEEN_MAX = 50_000;
+
+/** Reply content per redeem refusal (see `REPLY_REASON` for the app contract). */
+const REDEEM_FAILURE_REPLY: Record<RedeemFailureReason, string> = {
+  redeemed: REPLY_REASON.redeemed,
+  expired: REPLY_REASON.expired,
+  'not-found': REPLY_REASON.notFound,
+};
 
 /** Single bucket key for the global (all-sender) redeem limiter. */
 const GLOBAL_REDEEM_KEY = 'all';
@@ -155,10 +168,8 @@ export class ReGBYBroker {
       }
       // Neither verdict arises for request_regby_content, so the failure
       // reuses request_regby_code's success intent (`regby_code`); the
-      // non-code content reads as an error. `Invalid Request` is one of the
-      // four reasons the app will surface verbatim, anything else renders as
-      // its generic fallback.
-      await this.transport.reply(target, REPLY_INTENT.request_regby_code, 'Invalid Request');
+      // non-code content reads as an error.
+      await this.transport.reply(target, REPLY_INTENT.request_regby_code, REPLY_REASON.invalid);
       return;
     }
 
@@ -193,7 +204,7 @@ export class ReGBYBroker {
         await this.transport.reply(
           target,
           REPLY_INTENT.request_regby_code,
-          'Service Busy, Try Again',
+          REPLY_REASON.busy,
         );
         return;
       }
@@ -216,7 +227,7 @@ export class ReGBYBroker {
 
     const result = this.store.redeem(message.code);
     if (!result.ok) {
-      // A not-found (as opposed to expired) is a miss against the code space -
+      // A not-found (as opposed to expired/redeemed) is a miss against the code space -
       // i.e. a guess. Count strikes per sender and blacklist a persistent
       // guesser; return no reply so the failure isn't an enumeration oracle.
       if (result.reason === 'not-found' && !this.redeemFails.allow(target.recipientPubkey)) {
@@ -233,14 +244,14 @@ export class ReGBYBroker {
       await this.transport.reply(
         target,
         REPLY_INTENT.request_regby_content,
-        result.reason === 'expired' ? 'Code Expired' : 'Code Not Found',
+        REDEEM_FAILURE_REPLY[result.reason],
       );
       return;
     }
     logger.info('Redeemed code', { from });
     // Consume-before-publish is the at-most-once order, so a reply no relay
-    // took has already burnt the code: the customer's retry reads Code Expired
-    // and the merchant must re-mint. Surface it, or it looks like user error.
+    // took has already burnt the code: the customer's retry is refused and the
+    // merchant must re-mint. Surface it, or it looks like user error.
     const delivered = await this.transport.reply(
       target,
       REPLY_INTENT.request_regby_content,

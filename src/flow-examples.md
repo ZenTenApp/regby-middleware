@@ -99,7 +99,7 @@ Event:
   "sig": "…"
 }
 ```
-Server: `store.redeem("42891337")` → found + unexpired → returns URI and **consumes** the code (URI wiped, `expires_at` pulled to now). A second redeem gets `Code Expired`.
+Server: `store.redeem("42891337")` → found + unexpired → returns URI and **consumes** the code (URI wiped). It also stamps `redeemed_at`, so any later redeem gets `Code Already Redeemed` for the next hour.
 
 ## Hop 4 - middleman → customer (`i: regby_content`)
 
@@ -142,9 +142,10 @@ Code Not Found
 Event tags: `["p", customer]`, `["e", <customer request id>]`, `["i","regby_content"]` (redeem
 failure) or `["i","regby_code"]` (mint failure), `["expiration", …]`.
 `content` is one of:
-- `"Code Expired"` - existed but already used or past the 1-min validity (still retained, < 1 h old). Reply `i:regby_content`.
-  - "Used" includes a redeem whose reply no relay accepted: the code is consumed before the reply is published (at-most-once), so a dropped reply burns it and the customer's retry lands here. Recovery is a re-mint at the POS; the server logs `Code consumed but its reply reached no relay`.
-- `"Code Not Found"` - never minted, or past its 1-h retention (purged). Reply `i:regby_content`.
+- `"Code Already Redeemed"` - already redeemed once (inside its 1-min validity or after it), still retained (< 1 h old). Reply `i:regby_content`.
+  - This includes a redeem whose reply no relay accepted: the code is consumed before the reply is published (at-most-once), so a dropped reply burns it and the customer's retry lands here. Recovery is a re-mint at the POS; the server logs `Code consumed but its reply reached no relay`.
+- `"Code Expired"` - existed but past the 1-min validity and never redeemed (still retained, < 1 h old). Reply `i:regby_content`.
+- `"Code Not Found"` - never minted, or more than 1 h old. Reply `i:regby_content`. The number itself stays reserved for 24 h, so it is never issued to another request before then.
 - `"Service Busy, Try Again"` - mint-time store overflow. Reply `i:regby_code`.
 - `"Invalid Request"` - a `request_regby_code` whose decrypted payload was not
   `defito://`. Reply `i:regby_code`. The sender is also **blacklisted for 24 h**;
@@ -156,7 +157,7 @@ failure) or `["i","regby_code"]` (mint failure), `["expiration", …]`.
 - Intent is the `["i",<intent>]` tag (signed → authenticated); no `type` field, no `requestId`.
 - Correlation is the `["e", <request-event-id>]` reply tag.
 - Server subscription: `{ kinds:[4], "#p":[MID], "#i":["request_regby_code","request_regby_content"] }`.
-- Code validity = 1 min, anchored to the merchant request's `created_at` (skew-clamped). Single-use: the first redeem consumes it. Used or lapsed codes answer `Code Expired` for 1 h (URI already wiped), then purge to `Code Not Found`.
+- Code validity = 1 min, anchored to the merchant request's `created_at` (skew-clamped). Single-use: the first redeem consumes it. A used code answers `Code Already Redeemed` and a lapsed, never-used one `Code Expired`, each for 1 h (URI already wiped), then `Code Not Found`. The number is not reissued for 24 h.
 - Relay retention = NIP-40 `expiration` = `created_at + 1 h` on every event (maintenance buffer, unrelated to code validity).
 - **Active cleanup**: after a reply's 1-hour expiration, the middleman publishes a NIP-09 `kind 5`
   deletion referencing its own reply event ids (batched), since NIP-40 is advisory and not all relays honor
@@ -167,6 +168,7 @@ failure) or `["i","regby_code"]` (mint failure), `["expiration", …]`.
   (covers replies from the current process; older ones fall back to NIP-40 relay expiry), so there's no
   boot wipe of own events.
 - **Daily rotation**: a new SQLite file is opened per UTC day (nested `YYYY/MM/regby-YYYY-MM-DD.db` from `REGBY_DB_PATH`),
-  switched at 00:00 UTC; old files are kept on disk. Only the current day's file is read/written, so a code
-  minted just before midnight is unreachable after the roll (current-day-only). Each row also stores a
-  `created_at` audit column (wall-clock mint time).
+  switched at 00:00 UTC; old files are kept on disk. Only the current day's file is read/written, but
+  opening it copies in the previous day's codes from the last 24 h, so a code minted just before midnight
+  still works after the roll and no number is reissued within 24 h. Each row also stores `created_at`
+  (wall-clock mint time, the start of the 24 h reuse window).

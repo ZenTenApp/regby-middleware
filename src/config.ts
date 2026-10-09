@@ -5,6 +5,7 @@
 import 'dotenv/config';
 import { getPublicKey } from 'nostr-tools/pure';
 import { hexToBytes } from 'nostr-tools/utils';
+import { CODE_REUSE_SECONDS } from './store.ts';
 
 export interface Config {
   /** 32-byte middleman secret key. */
@@ -14,7 +15,8 @@ export interface Config {
   relays: string[];
   /** Code validity window (anchored to the request's created_at). */
   codeTtlSeconds: number;
-  /** How long an expired code row is kept (redeem → `Code Expired`) before purge. */
+  /** How long a lapsed code still answers `Code Expired` / `Code Already Redeemed`.
+   * The row itself is kept 24 h (`CODE_REUSE_SECONDS`) so its number is not reused. */
   codeRetainSeconds: number;
   /** Base SQLite path; a per-UTC-day file (`regby-YYYY-MM-DD.db`) is derived from it. */
   dbPath: string;
@@ -58,9 +60,8 @@ function intEnv(name: string, fallback: number): number {
 const HEX64_RE = /^[0-9a-f]{64}$/i;
 
 /**
- * Hard ceiling the dedicated ReGBY DM relays (`wss://dm1.zentext.me`,
- * `wss://dm2.nostr.box`) put on
- * NIP-40 expiration: they drop any event stamped further out than 72h. Every
+ * Hard ceiling the dedicated ReGBY DM relays (`REGBY_RELAYS`) put on NIP-40
+ * expiration: they drop any event stamped further out than 72h. Every
  * reply we publish carries `eventExpirySeconds`, so a value above this would
  * silently get every reply bounced. Fail loud at boot instead.
  */
@@ -104,6 +105,11 @@ export function loadConfig(): Config {
   if (codeRetainSeconds < codeTtlSeconds) {
     throw new Error('REGBY_CODE_RETAIN_SECONDS must be >= REGBY_CODE_TTL_SECONDS');
   }
+  // Rows are deleted, and not carried across midnight, once the 24 h reuse
+  // window ends; an answer window past it would answer for rows already gone.
+  if (codeRetainSeconds > CODE_REUSE_SECONDS) {
+    throw new Error(`REGBY_CODE_RETAIN_SECONDS must be <= ${CODE_REUSE_SECONDS}`);
+  }
   // A stale stamp is clamped to `now - skew`, so a skew at or past the TTL
   // anchors the code at or before its own expiry: mint refuses it and the
   // merchant is told "Service Busy" on every retry, since the next request is
@@ -137,7 +143,7 @@ export function loadConfig(): Config {
     redeemRateMax: intEnv('REGBY_REDEEM_RATE_MAX', 300),
     redeemRateWindowSeconds: intEnv('REGBY_REDEEM_RATE_WINDOW_SECONDS', 60),
     redeemFailMax: intEnv('REGBY_REDEEM_FAIL_MAX', 10),
-    storeMax: intEnv('REGBY_STORE_MAX', 10_000),
+    storeMax: intEnv('REGBY_STORE_MAX', 1_000_000),
     blacklistSeconds: intEnv('REGBY_BLACKLIST_SECONDS', 86_400),
     logLevel: process.env.REGBY_LOG_LEVEL,
   };

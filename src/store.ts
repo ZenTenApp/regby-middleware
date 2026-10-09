@@ -3,25 +3,34 @@
  * URI, persisted so codes survive a server restart (the previous in-memory Map
  * lost every code on reboot - a restart used to make all codes unredeemable).
  *
- * Validity timestamps per row, both anchored to the merchant request's
- * `created_at` (skew-clamped by the caller):
- *   - `expires_at`   = startedAt + ttl     → code **validity** (1 min). Past this
- *     a redeem returns `expired`, but the row is KEPT.
- *   - `retain_until` = startedAt + retain  → row **retention** (1 h). A redeem
- *     between expiry and retention still reports `expired` (clear UX: "the code
- *     was real but lapsed"); only past retention is it `not-found`.
- * Plus `created_at` = the server wall-clock at mint, an audit column not used in
- * any validity decision.
+ * Validity timestamps per row, both anchored to the merchant request's own
+ * `created_at` (skew-clamped by the caller, passed in as `startedAt`):
+ *   - `expires_at`   = startedAt + ttl     → code **validity** (1 min). Past it
+ *     an unredeemed code reports `expired`, but the row is KEPT.
+ *   - `retain_until` = startedAt + retain  → **answer window** (1 h). Until then
+ *     a lapsed code still reports `expired` (clear UX: "the code was real but
+ *     lapsed"); past it, `not-found`.
  *
- * **Single-use**: the first successful redeem consumes the code - its `uri` is
- * wiped and `expires_at` pulled to now, so a second redeem reports `expired`
- * exactly like a lapsed code. The sweep also wipes the `uri` of every lapsed
- * row and checkpoints the WAL, so the plaintext invoice stays on disk at most
- * one sweep interval past validity or use: `secure_delete` zeroes the bytes in
- * the main file, and the TRUNCATE checkpoint drops the pre-wipe page images
- * the `-wal` log would otherwise keep. Only the code shell stays for the
- * retention window. The consume is a compare-and-set on the row itself, so a
- * code is served at most once even if the wall clock steps backward.
+ * Two more columns: `created_at` = the server wall-clock at mint, which never
+ * decides validity but does decide when the number may be reused (below), and
+ * `redeemed_at` = when the code was redeemed, NULL until then.
+ *
+ * **No reuse for 24 h**: a row is DELETED only `CODE_REUSE_SECONDS` (24 h) after
+ * its `created_at`, so the primary key keeps that number out of every mint until
+ * then. Past the answer window the row still exists but redeem reports
+ * `not-found`, exactly as if it were gone. The 24 h is a constant, not config:
+ * it is a guarantee to customers holding an old code, not a tuning knob.
+ *
+ * **Single-use**: the first successful redeem consumes the code - it stamps
+ * `redeemed_at` and wipes `uri`. Any later redeem inside the answer window
+ * reports `redeemed`, inside validity or past it: `redeemed_at` is what tells a
+ * used code from a lapsed one, since both end with an empty `uri`. The sweep
+ * also wipes the `uri` of every lapsed row and checkpoints the WAL, so the
+ * plaintext invoice stays on disk at most one sweep interval past validity or
+ * use: `secure_delete` zeroes the bytes in the main file, and the TRUNCATE
+ * checkpoint drops the pre-wipe page images the `-wal` log would otherwise
+ * keep. Only the code shell stays, for the 24 h reuse window. The consume is a compare-and-set on the row itself, so a
+ * code is redeemed at most once even if the wall clock steps backward.
  * `node:sqlite`'s synchronous API matches this single-process, single-loop
  * server - no async driver, no extra dependency.
  *
@@ -29,9 +38,10 @@
  */
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { randomInt } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
 import { nowSeconds } from './time.ts';
+import { logger } from './logger.ts';
 
 export interface MintResult {
   code: string;
@@ -39,9 +49,9 @@ export interface MintResult {
   expiresAt: number;
 }
 
-export type RedeemResult =
-  | { ok: true; uri: string }
-  | { ok: false; reason: 'not-found' | 'expired' };
+export type RedeemFailureReason = 'not-found' | 'expired' | 'redeemed';
+
+export type RedeemResult = { ok: true; uri: string } | { ok: false; reason: RedeemFailureReason };
 
 /** Shared surface of `CodeStore` and its rotating wrapper - the broker's seam. */
 export interface CodeStoreLike {
@@ -56,7 +66,27 @@ interface CodeRow {
   uri: string;
   expires_at: number;
   retain_until: number;
+  redeemed_at: number | null;
 }
+
+/**
+ * Daily files written before `redeemed_at` existed lack the column, and
+ * `CREATE TABLE IF NOT EXISTS` never alters an existing table. Their rows read
+ * as never redeemed: the old build marked a use only by pulling `expires_at` to
+ * now, so a code consumed before the upgrade answers `expired`, not `redeemed`,
+ * for the rest of its answer window.
+ */
+function addRedeemedAtColumn(db: DatabaseSync): void {
+  const columns = db.prepare('PRAGMA table_info(codes)').all() as { name: string }[];
+  if (columns.some((c) => c.name === 'redeemed_at')) return;
+  db.exec('ALTER TABLE codes ADD COLUMN redeemed_at INTEGER');
+}
+
+/**
+ * A code number is never issued again within this long of its last issue, so a
+ * stale code in a customer's hands can never open someone else's invoice.
+ */
+export const CODE_REUSE_SECONDS = 86_400;
 
 const CODE_SPACE = 100_000_000; // eight digits: 00000000–99999999
 const MAX_MINT_ATTEMPTS = 20; // collision retries before giving up
@@ -65,7 +95,6 @@ export class CodeStore implements CodeStoreLike {
   private readonly db: DatabaseSync;
   private readonly insertStmt: StatementSync;
   private readonly selectStmt: StatementSync;
-  private readonly deleteStmt: StatementSync;
   private readonly consumeStmt: StatementSync;
   private readonly scrubStmt: StatementSync;
   private readonly sweepStmt: StatementSync;
@@ -91,26 +120,35 @@ export class CodeStore implements CodeStoreLike {
         uri          TEXT NOT NULL,
         created_at   INTEGER NOT NULL,
         expires_at   INTEGER NOT NULL,
-        retain_until INTEGER NOT NULL
+        retain_until INTEGER NOT NULL,
+        redeemed_at  INTEGER
       );
-      CREATE INDEX IF NOT EXISTS idx_codes_retain ON codes(retain_until);
+      CREATE INDEX IF NOT EXISTS idx_codes_created ON codes(created_at);
+      DROP INDEX IF EXISTS idx_codes_retain;
     `);
+    addRedeemedAtColumn(this.db);
+    // The scrub runs on every mint over a table holding a day of rows; only the
+    // few still carrying an invoice are worth visiting.
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_codes_live ON codes(expires_at) WHERE uri != ''",
+    );
     this.insertStmt = this.db.prepare(
       'INSERT OR IGNORE INTO codes (code, uri, created_at, expires_at, retain_until) VALUES (?, ?, ?, ?, ?)',
     );
     this.selectStmt = this.db.prepare(
-      'SELECT uri, expires_at, retain_until FROM codes WHERE code = ?',
+      'SELECT uri, expires_at, retain_until, redeemed_at FROM codes WHERE code = ?',
     );
-    this.deleteStmt = this.db.prepare('DELETE FROM codes WHERE code = ?');
     // Guarded on the row, not on the caller's earlier read: only an unused,
-    // unexpired row flips, so `changes` alone is the redeem verdict.
+    // unexpired row flips, so `changes` alone is the redeem verdict. `uri != ''`
+    // also holds back a lapsed row the sweep already wiped, should the clock
+    // step back below its `expires_at`.
     this.consumeStmt = this.db.prepare(
-      "UPDATE codes SET uri = '', expires_at = ?1 WHERE code = ?2 AND uri != '' AND expires_at > ?1",
+      "UPDATE codes SET uri = '', redeemed_at = ?1 WHERE code = ?2 AND redeemed_at IS NULL AND uri != '' AND expires_at > ?1",
     );
     this.scrubStmt = this.db.prepare(
       "UPDATE codes SET uri = '' WHERE expires_at <= ? AND uri != ''",
     );
-    this.sweepStmt = this.db.prepare('DELETE FROM codes WHERE retain_until <= ?');
+    this.sweepStmt = this.db.prepare('DELETE FROM codes WHERE created_at <= ?');
     this.countStmt = this.db.prepare('SELECT COUNT(*) AS n FROM codes');
   }
 
@@ -119,15 +157,17 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Mint a unique code for a URI, validity anchored to `startedAt`. Returns null
-   * when the store is at capacity, no free code was found, or the anchor is
-   * already past validity (all "try again").
+   * Mint a unique code for a URI, validity anchored to `startedAt`. Never a
+   * number issued in the last 24 h: those rows still hold the primary key.
+   * Returns null when the store is at capacity (codes issued in the last 24 h),
+   * no free code was found, or the anchor is already past validity (all "try
+   * again").
    */
   mint(uri: string, startedAt: number): MintResult | null {
     this.purge();
     if (this.size >= this.maxEntries) return null;
 
-    const createdAt = this.now(); // wall-clock mint time (audit column)
+    const createdAt = this.now(); // wall-clock mint time, anchors the reuse window
     const expiresAt = startedAt + this.ttlSeconds;
     if (expiresAt <= createdAt) return null;
     const retainUntil = startedAt + this.retainSeconds;
@@ -142,31 +182,32 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Redeem a code. Valid → `ok`, and the code is consumed (single-use). Used or
-   * past validity but within retention → `expired` (row kept until retention
-   * lapses). Unknown or past retention → `not-found`.
+   * Redeem a code. Valid → `ok`, and the code is consumed (single-use). Already
+   * redeemed → `redeemed`, until retention lapses. Never redeemed and past
+   * validity → `expired`, likewise. Unknown or past the answer window →
+   * `not-found` (the row itself stays until the 24 h reuse window ends).
    */
   redeem(code: string): RedeemResult {
     const row = this.selectStmt.get(code) as CodeRow | undefined;
     if (!row) return { ok: false, reason: 'not-found' };
 
     const now = this.now();
-    if (now >= row.retain_until) {
-      // Past retention but the sweep hasn't run yet - drop it and report gone.
-      this.deleteStmt.run(code);
-      return { ok: false, reason: 'not-found' };
-    }
+    // Past the answer window: gone as far as the customer is concerned, though
+    // the row stays to block reuse of the number.
+    if (now >= row.retain_until) return { ok: false, reason: 'not-found' };
+    if (row.redeemed_at !== null) return { ok: false, reason: 'redeemed' };
     if (Number(this.consumeStmt.run(now, code).changes) === 1) {
       return { ok: true, uri: row.uri };
     }
+    // Never redeemed, and the guarded consume refused it: it has lapsed.
     return { ok: false, reason: 'expired' };
   }
 
-  /** Wipe the invoice from lapsed rows and drop rows past retention. */
+  /** Wipe the invoice from lapsed rows; drop rows past the 24 h reuse window. */
   private purge(): void {
     const now = this.now();
     this.scrubStmt.run(now);
-    this.sweepStmt.run(now);
+    this.sweepStmt.run(now - CODE_REUSE_SECONDS);
   }
 
   /**
@@ -189,8 +230,40 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
+   * Copy the rows issued in the last 24 h from another day's file, as they
+   * stand (invoice, expiry, redeemed state), then wipe every invoice left in
+   * that file. Run when a new day's file opens, so midnight neither frees those
+   * numbers for reuse nor cuts short a code still inside its minute. The wipe
+   * matters on startup: a server down across midnight never retired yesterday's
+   * file, and the archive must not keep the invoices it carried out of it.
+   * Idempotent: rows already here are left alone.
+   */
+  carryFrom(path: string): void {
+    if (!existsSync(path)) return;
+    this.db.prepare('ATTACH DATABASE ? AS prev').run(path);
+    try {
+      const columns = this.db.prepare('PRAGMA prev.table_info(codes)').all() as { name: string }[];
+      if (columns.length === 0) return;
+      // A file from before `redeemed_at` existed carries its codes as never redeemed.
+      const redeemedAt = columns.some((c) => c.name === 'redeemed_at') ? 'redeemed_at' : 'NULL';
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO main.codes (code, uri, created_at, expires_at, retain_until, redeemed_at)
+           SELECT code, uri, created_at, expires_at, retain_until, ${redeemedAt}
+           FROM prev.codes WHERE created_at > ?`,
+        )
+        .run(this.now() - CODE_REUSE_SECONDS);
+      this.db.exec('PRAGMA prev.secure_delete = ON');
+      this.db.exec("UPDATE prev.codes SET uri = '' WHERE uri != ''");
+    } finally {
+      this.db.exec('DETACH DATABASE prev');
+    }
+  }
+
+  /**
    * Wipe every invoice, then close. For a file leaving service on day rotation:
-   * its codes become unreachable, and the archived file must not keep their URIs.
+   * its live codes were carried into the new day's file, and the archived file
+   * must not keep their URIs.
    */
   retire(): void {
     this.scrubStmt.run(Number.MAX_SAFE_INTEGER);
@@ -223,13 +296,14 @@ export function dailyDbPath(basePath: string, epochSeconds: number): string {
 /**
  * A `CodeStore` that writes to a fresh SQLite file each UTC day, nested under
  * `YYYY/MM/regby-<date>.db`, and switches at 00:00 UTC. Old files are KEPT on
- * disk, never purged - a daily
- * archive. The active store is the only one read or written.
+ * disk, never purged - a daily archive. The active store is the only one read
+ * or written.
  *
- * **Current-day-only**: a code lives solely in the file of the day it was minted.
- * A code minted just before midnight becomes unreachable once the day rolls over,
- * even though its retention window hasn't lapsed - a deliberate trade (chosen over
- * reading the previous day's file) for simple, self-contained daily files. The
+ * **Midnight carries the last 24 h**: opening a day's file (on rotation, and on
+ * startup) copies in the previous day's rows issued within the last 24 h. Without
+ * it the new file starts empty, every number from before midnight is free to
+ * mint again within minutes, and a code minted at 23:59:50 dies at midnight. The
+ * 24 h window can never reach back past yesterday, so one file is enough. The
  * switch is checked lazily on every op, and the broker's 60 s sweep timer calls
  * `sweep()`, so rotation happens within ~60 s of midnight even with no traffic.
  */
@@ -249,22 +323,44 @@ export class RotatingCodeStore implements CodeStoreLike {
   }
 
   private openCurrent(): CodeStore {
-    return new CodeStore(
+    const now = this.now();
+    const store = new CodeStore(
       this.ttlSeconds,
       this.retainSeconds,
       this.maxEntries,
-      dailyDbPath(this.basePath, this.now()),
+      dailyDbPath(this.basePath, now),
       this.now,
     );
+    try {
+      store.carryFrom(dailyDbPath(this.basePath, now - CODE_REUSE_SECONDS));
+    } catch (err) {
+      store.close();
+      throw err;
+    }
+    return store;
   }
 
   /** Roll to today's file if the UTC day changed since the last op. */
   private rotateIfNeeded(): void {
     const day = utcDayKey(this.now());
     if (day === this.currentDay) return;
+    // Open (and carry into) the new file BEFORE retiring the old one: retire
+    // wipes every invoice, and a code still inside its minute must cross over.
+    let next: CodeStore;
+    try {
+      next = this.openCurrent();
+    } catch (err) {
+      // Stay on yesterday's file, which still holds every live code, and retry
+      // on the next op. Opening today's without the carry would free the last
+      // 24 h of numbers for reuse.
+      logger.error('Day rotation failed - staying on the previous file', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
     this.current.retire();
+    this.current = next;
     this.currentDay = day;
-    this.current = this.openCurrent();
   }
 
   mint(uri: string, startedAt: number): MintResult | null {

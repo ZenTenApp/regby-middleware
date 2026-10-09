@@ -117,6 +117,20 @@ export const REPLY_INTENT = {
   request_regby_content: 'regby_content',
 } as const satisfies Record<InboundIntent, string>;
 
+/**
+ * Every reason a failure reply can carry. The app shows only these exact
+ * strings (`sanitizeReGBYError`) and renders anything else as a generic
+ * fallback, so a new or reworded reason needs an app release before its text
+ * reaches a user. Pinned against the app's allowlist by the parity tests.
+ */
+export const REPLY_REASON = {
+  notFound: 'Code Not Found',
+  expired: 'Code Expired',
+  redeemed: 'Code Already Redeemed',
+  busy: 'Service Busy, Try Again',
+  invalid: 'Invalid Request',
+} as const;
+
 /** The two intents the middleman emits; a failure reuses the matching one. */
 export type OutboundIntent = (typeof REPLY_INTENT)[InboundIntent];
 

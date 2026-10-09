@@ -8,6 +8,7 @@ import {
   isValidPaymentUri,
   DEFITO_PREFIX,
   MAX_PAYLOAD_LINES,
+  REPLY_REASON,
 } from './protocol.ts';
 
 test('extractIntent reads a known i tag', () => {
@@ -490,4 +491,20 @@ test('real text is never read as binary', () => {
     ok: false,
     reason: 'malformed',
   });
+});
+
+// Cross-repo parity for failure-reply text: the same list, in the same order,
+// as `APP_REASONS` in the app's `__tests__/protocol-parity.test.ts`. A reason
+// this server sends that the app does not list renders there as a generic
+// error - which is how a renamed reason once nearly shipped unreadable.
+const PARITY_REPLY_REASONS: readonly string[] = [
+  'Code Not Found',
+  'Code Expired',
+  'Code Already Redeemed',
+  'Service Busy, Try Again',
+  'Invalid Request',
+];
+
+test('parity: every failure reason this server sends is on the app allowlist', () => {
+  assert.deepEqual(Object.values(REPLY_REASON), PARITY_REPLY_REASONS);
 });
