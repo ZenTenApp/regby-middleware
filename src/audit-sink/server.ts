@@ -1,17 +1,24 @@
 /**
  * HTTP intake for the broker's audit batches: `POST /events` with the shared
- * bearer token and an `AuditBatch` body. Plain http by design - TLS terminates
- * at a proxy in front (see README), which keeps certificates out of the app.
+ * bearer token and an `AuditBatch` body. Plain http by design: it is reached
+ * only over the compose network beside the broker, or through a TLS proxy if
+ * it ever runs elsewhere, which keeps certificates out of the app.
  *
  * Every answer is a bare status the sender acts on: 204 stored, 401 bad token,
- * 400/413 off-contract (dropped, never retried), 5xx retried.
+ * 400/413 off-contract (dropped, never retried), 5xx retried (a database
+ * outage lands here, so the broker keeps the batch queued).
  */
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { AUDIT_BATCH_MAX, parseAuditBatch } from '../audit.ts';
+import { AUDIT_BATCH_MAX, parseAuditBatch, type AuditRecord } from '../audit.ts';
 import { MAX_STORED_LENGTH } from '../protocol.ts';
 import { errorMessage, logger } from '../logger.ts';
-import type { AuditStore } from './store.ts';
+
+/** What the intake stores into; `AuditStore` is the production one. */
+export interface AuditSink {
+  /** Store a batch atomically; a record id seen before is skipped (a retry). Resolves to the rows added. */
+  insert(records: readonly AuditRecord[]): Promise<number>;
+}
 
 /**
  * A full batch of maximal records at worst-case encoding: a `uri` character
@@ -41,7 +48,7 @@ async function readBody(req: IncomingMessage): Promise<string | null> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-async function handle(req: IncomingMessage, store: AuditStore, token: string): Promise<number> {
+async function handle(req: IncomingMessage, store: AuditSink, token: string): Promise<number> {
   if (req.url === '/health' && req.method === 'GET') return 204;
   if (req.url !== '/events') return 404;
   if (req.method !== 'POST') return 405;
@@ -56,11 +63,11 @@ async function handle(req: IncomingMessage, store: AuditStore, token: string): P
   }
   const records = parseAuditBatch(body);
   if (!records) return 400;
-  store.insert(records);
+  await store.insert(records);
   return 204;
 }
 
-export function createSinkServer(store: AuditStore, token: string): Server {
+export function createSinkServer(store: AuditSink, token: string): Server {
   return createServer((req, res) => {
     handle(req, store, token)
       .catch((err: unknown) => {

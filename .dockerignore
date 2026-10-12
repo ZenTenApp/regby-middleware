@@ -5,10 +5,10 @@ dist
 .env.local
 .env.audit-sink
 data
-audit-data
 *.db
 *.db-wal
 *.db-shm
 *.log
 *.txt
 .DS_Store
+certs

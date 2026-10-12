@@ -1,7 +1,8 @@
 /**
  * Audit wire contract between the broker (sender, `audit-sender.ts`) and the
- * audit sink (`audit-sink/`), which runs on a separate machine and owns the
- * permanent history: storage, retention, access. The broker keeps none of it.
+ * audit sink (`audit-sink/`), a separate process that alone holds the database
+ * credentials and owns the permanent history: storage, retention, access. The
+ * broker keeps none of it.
  *
  * One record per request the broker ANSWERED (or deliberately left unanswered
  * after doing work, like a guesser it blacklisted). Not recorded: events

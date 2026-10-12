@@ -8,10 +8,12 @@ dist/
 # SQLite code store (+ WAL/SHM sidecars)
 regby.db
 /data/
-/audit-data/
 *.db
 *.db-wal
 *.db-shm
 
 # Scratch notes - never commit
 regby*.txt
+
+# Database CA and other connection material
+certs/

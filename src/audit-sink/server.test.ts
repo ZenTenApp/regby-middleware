@@ -2,15 +2,29 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { AuditStore } from './store.ts';
-import { createSinkServer } from './server.ts';
+import { createSinkServer, type AuditSink } from './server.ts';
+import type { AuditRecord } from '../audit.ts';
 import { auditRecord } from '../audit.fixture.ts';
 
 const TOKEN = 's'.repeat(32);
 
-/** Run `fn` against a live sink on a free port, over an in-memory store. */
-async function withSink(fn: (url: string, store: AuditStore) => Promise<void>): Promise<void> {
-  const store = new AuditStore(':memory:', 365, 100);
+/** Stands in for the database: the intake only needs `insert`. */
+class MemorySink implements AuditSink {
+  private readonly ids = new Set<string>();
+
+  get size(): number {
+    return this.ids.size;
+  }
+
+  async insert(records: readonly AuditRecord[]): Promise<number> {
+    const before = this.ids.size;
+    for (const r of records) this.ids.add(r.id);
+    return this.ids.size - before;
+  }
+}
+
+/** Run `fn` against a live sink on a free port, over `store` (in-memory by default). */
+async function withSink<S extends AuditSink>(fn: (url: string, store: S) => Promise<void>, store: S): Promise<void> {
   const server = createSinkServer(store, TOKEN);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
@@ -18,7 +32,6 @@ async function withSink(fn: (url: string, store: AuditStore) => Promise<void>): 
     await fn(`http://127.0.0.1:${port}`, store);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    store.close();
   }
 }
 
@@ -35,7 +48,7 @@ test('a valid batch with the right token is stored', async () => {
     const res = await post(url, JSON.stringify({ records: [auditRecord({ id: randomUUID() })] }));
     assert.equal(res.status, 204);
     assert.equal(store.size, 1);
-  });
+  }, new MemorySink());
 });
 
 test('a wrong or missing token stores nothing', async () => {
@@ -45,7 +58,7 @@ test('a wrong or missing token stores nothing', async () => {
     const bare = await fetch(`${url}/events`, { method: 'POST', body });
     assert.equal(bare.status, 401);
     assert.equal(store.size, 0);
-  });
+  }, new MemorySink());
 });
 
 test('malformed JSON, an off-contract batch and an oversized body are refused', async () => {
@@ -56,7 +69,7 @@ test('malformed JSON, an off-contract batch and an oversized body are refused', 
     const oversized = await post(url, 'x'.repeat(11_000_000)).then((r) => r.status, () => 'reset');
     assert.ok(oversized === 413 || oversized === 'reset', String(oversized));
     assert.equal(store.size, 0);
-  });
+  }, new MemorySink());
 });
 
 test('unknown routes and methods are refused; health answers', async () => {
@@ -64,5 +77,13 @@ test('unknown routes and methods are refused; health answers', async () => {
     assert.equal((await fetch(`${url}/nope`)).status, 404);
     assert.equal((await fetch(`${url}/events`)).status, 405);
     assert.equal((await fetch(`${url}/health`)).status, 204);
-  });
+  }, new MemorySink());
+});
+
+test('a storage failure answers 5xx, so the broker retries the batch', async () => {
+  const failing: AuditSink = { insert: () => Promise.reject(new Error('database down')) };
+  await withSink(async (url) => {
+    const res = await post(url, JSON.stringify({ records: [auditRecord({ id: randomUUID() })] }));
+    assert.equal(res.status, 500);
+  }, failing);
 });

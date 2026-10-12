@@ -1,24 +1,25 @@
 /**
- * Audit sink entry point. Runs on the external machine, not beside the broker:
+ * Audit sink entry point. Its own container next to the broker, the only one
+ * with the database credentials:
  * `node dist/audit-sink/index.js`.
  */
-import { resolve } from 'node:path';
 import { loadSinkConfig } from './config.ts';
-import { AuditStore } from './store.ts';
+import { AuditStore, poolConfig } from './store.ts';
 import { createSinkServer } from './server.ts';
-import { configureLogger, logger } from '../logger.ts';
+import { configureLogger, errorMessage, logger } from '../logger.ts';
 import { onShutdown, runMain } from '../process.ts';
 
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
-runMain(() => {
-  // Owner-only for every file this process creates, WAL sidecars included.
-  process.umask(0o077);
+runMain(async () => {
   const config = loadSinkConfig();
   configureLogger(config.logLevel);
 
-  const store = new AuditStore(config.dbPath, config.retainDays, config.maxRows);
-  const pruneTimer = setInterval(() => store.prune(), PRUNE_INTERVAL_MS);
+  const db = poolConfig(config.databaseUrl, config.databaseCa);
+  const store = await AuditStore.open(db, config.retainDays, config.maxRows);
+  const pruneTimer = setInterval(() => {
+    store.prune().catch((err: unknown) => logger.error('Audit prune failed', { error: errorMessage(err) }));
+  }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
   const server = createSinkServer(store, config.token);
@@ -26,21 +27,17 @@ runMain(() => {
     logger.info('Audit sink listening', {
       host: config.host,
       port: config.port,
-      dbPath: resolve(config.dbPath),
+      // Host only: the URL carries the database password.
+      database: `${db.host}:${db.port}/${db.database}`,
       rows: store.size,
       retainDays: config.retainDays,
       maxRows: config.maxRows,
     });
   });
 
-  onShutdown(
-    () =>
-      new Promise<void>((done) => {
-        clearInterval(pruneTimer);
-        server.close(() => {
-          store.close();
-          done();
-        });
-      }),
-  );
+  onShutdown(async () => {
+    clearInterval(pruneTimer);
+    await new Promise<void>((done) => server.close(() => done()));
+    await store.close();
+  });
 });

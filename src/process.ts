@@ -3,14 +3,14 @@
  */
 import { errorMessage, logger } from './logger.ts';
 
-/** Run `main`; a throw at boot is logged and exits non-zero. */
-export function runMain(main: () => void): void {
-  try {
-    main();
-  } catch (err) {
-    logger.error('Fatal on boot', { message: errorMessage(err) });
-    process.exit(1);
-  }
+/** Run `main`; a throw or rejection at boot is logged and exits non-zero. */
+export function runMain(main: () => void | Promise<void>): void {
+  Promise.resolve()
+    .then(main)
+    .catch((err: unknown) => {
+      logger.error('Fatal on boot', { message: errorMessage(err) });
+      process.exit(1);
+    });
 }
 
 /**

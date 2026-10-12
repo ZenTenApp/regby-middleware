@@ -51,9 +51,13 @@ export interface Config {
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
+/** A dotless name such as `audit-sink`: a compose service on the host's private network, never public DNS. */
+const SERVICE_NAME_RE = /^[a-z0-9-]+$/i;
+
 /**
  * The token and full invoices ride this connection, so plain http is allowed
- * only to this machine (a local TLS-terminating tunnel, or a test sink).
+ * only to this machine: loopback, or a container beside the broker reached by
+ * its service name (docker-compose.audit.yml).
  */
 function loadAuditConfig(): AuditConfig | null {
   const raw = optional('REGBY_AUDIT_URL');
@@ -64,9 +68,10 @@ function loadAuditConfig(): AuditConfig | null {
   } catch {
     throw new Error(`REGBY_AUDIT_URL is not a URL: "${raw}"`);
   }
-  const secure = url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname));
+  const local = LOOPBACK_HOSTS.has(url.hostname) || SERVICE_NAME_RE.test(url.hostname);
+  const secure = url.protocol === 'https:' || (url.protocol === 'http:' && local);
   if (!secure) {
-    throw new Error('REGBY_AUDIT_URL must be https:// (http:// only to localhost)');
+    throw new Error('REGBY_AUDIT_URL must be https:// (http:// only to localhost or a compose service name)');
   }
   return {
     url,

@@ -1,7 +1,7 @@
 /**
- * Ships audit records to the external sink (`audit-sink/`) over HTTPS. The
- * broker never waits on it and never writes the history to its own disk: a
- * record goes into a bounded in-memory queue, and a background flush POSTs
+ * Ships audit records to the audit sink (`audit-sink/`) over HTTPS, or plain
+ * http on loopback when the sink runs beside the broker. The broker never
+ * waits on it and never writes the history to its own disk: a record goes into a bounded in-memory queue, and a background flush POSTs
  * batches with a bearer token.
  *
  * Sink down: batches go back to the queue and retry with exponential backoff.

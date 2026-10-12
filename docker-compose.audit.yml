@@ -1,0 +1,33 @@
+# Audit sink beside the broker, on the same machine; the history itself lives
+# in the remote Postgres, never on this disk. Layered over the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.audit.yml up -d --build
+#
+# The broker reaches the sink by service name on the compose network; no port
+# is published to the host. Each container keeps its own network, so a sink
+# restart (database down at boot, a crash) never takes the broker offline: the
+# broker queues records and retries. Only the sink gets the database credentials.
+services:
+  audit-sink:
+    build: .
+    image: regby-middleware
+    container_name: regby-audit-sink
+    restart: unless-stopped
+    command: ["node", "dist/audit-sink/index.js"]
+    env_file: .env.audit-sink
+    environment:
+      # The CA file comes from the read-only mount below.
+      REGBY_AUDIT_DATABASE_CA: /certs/db-ca.pem
+      # All interfaces inside the container; with no published port, only the
+      # compose network can reach it.
+      REGBY_AUDIT_HOST: 0.0.0.0
+      REGBY_AUDIT_PORT: "8787"
+    volumes:
+      - ./certs:/certs:ro
+
+  regby:
+    # Compose stops dependents first, so the broker's last audit flush on
+    # shutdown still finds the sink up.
+    depends_on:
+      - audit-sink
+    environment:
+      REGBY_AUDIT_URL: http://audit-sink:8787/events
