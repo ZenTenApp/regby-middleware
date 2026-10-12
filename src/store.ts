@@ -22,15 +22,18 @@
  * it is a guarantee to customers holding an old code, not a tuning knob.
  *
  * **Single-use**: the first successful redeem consumes the code - it stamps
- * `redeemed_at` and wipes `uri`. Any later redeem inside the answer window
- * reports `redeemed`, inside validity or past it: `redeemed_at` is what tells a
- * used code from a lapsed one, since both end with an empty `uri`. The sweep
- * also wipes the `uri` of every lapsed row and checkpoints the WAL, so the
- * plaintext invoice stays on disk at most one sweep interval past validity or
- * use: `secure_delete` zeroes the bytes in the main file, and the TRUNCATE
- * checkpoint drops the pre-wipe page images the `-wal` log would otherwise
- * keep. Only the code shell stays, for the 24 h reuse window. The consume is a compare-and-set on the row itself, so a
- * code is redeemed at most once even if the wall clock steps backward.
+ * `redeemed_at`. Any later redeem inside the answer window reports `redeemed`,
+ * inside validity or past it. The consume is a compare-and-set on the row
+ * itself, so a code is redeemed at most once, and the store reads time through
+ * `monotonic`, so a wall clock stepping backward can't revive a lapsed code
+ * either (within one process).
+ *
+ * **Invoices stay for debugging**: a row keeps its `uri` until it is deleted
+ * with the row, 24 h after issue, so the live file shows what every recent
+ * code was for. Deleted rows are zeroed (`secure_delete`) and the sweep
+ * checkpoints the WAL so their page images leave the `-wal` log too. Archived
+ * daily files keep no invoice: rotation and startup wipe them (below).
+ *
  * `node:sqlite`'s synchronous API matches this single-process, single-loop
  * server - no async driver, no extra dependency.
  *
@@ -40,7 +43,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { randomInt } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join, parse } from 'node:path';
-import { nowSeconds } from './time.ts';
+import { monotonic, nowSeconds } from './time.ts';
 import { errorMessage, logger } from './logger.ts';
 
 export interface MintResult {
@@ -88,6 +91,9 @@ function addRedeemedAtColumn(db: DatabaseSync): void {
  */
 export const CODE_REUSE_SECONDS = 86_400;
 
+/** Empties every invoice in a file leaving service (rotation, startup scrub). */
+const WIPE_URIS_SQL = "UPDATE codes SET uri = '' WHERE uri != ''";
+
 const CODE_SPACE = 100_000_000; // eight digits: 00000000–99999999
 const MAX_MINT_ATTEMPTS = 20; // collision retries before giving up
 
@@ -96,23 +102,24 @@ export class CodeStore implements CodeStoreLike {
   private readonly insertStmt: StatementSync;
   private readonly selectStmt: StatementSync;
   private readonly consumeStmt: StatementSync;
-  private readonly scrubStmt: StatementSync;
   private readonly sweepStmt: StatementSync;
   private readonly countStmt: StatementSync;
+  private readonly now: () => number;
 
   constructor(
     private readonly ttlSeconds: number,
     private readonly retainSeconds: number,
     private readonly maxEntries: number,
     dbPath: string,
-    private readonly now: () => number = nowSeconds,
+    clock: () => number = nowSeconds,
   ) {
+    this.now = monotonic(clock);
     // SQLite won't create missing parent dirs; the daily path nests YYYY/MM.
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     // WAL keeps reads/writes from blocking each other and survives a hard crash.
     this.db.exec('PRAGMA journal_mode = WAL');
-    // Wiped invoices are overwritten with zeros, not left readable in free pages.
+    // Deleted rows (and archive wipes) are zeroed, not left readable in free pages.
     this.db.exec('PRAGMA secure_delete = ON');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS codes (
@@ -125,13 +132,10 @@ export class CodeStore implements CodeStoreLike {
       );
       CREATE INDEX IF NOT EXISTS idx_codes_created ON codes(created_at);
       DROP INDEX IF EXISTS idx_codes_retain;
+      -- Served the old per-mint invoice scrub.
+      DROP INDEX IF EXISTS idx_codes_live;
     `);
     addRedeemedAtColumn(this.db);
-    // The scrub runs on every mint over a table holding a day of rows; only the
-    // few still carrying an invoice are worth visiting.
-    this.db.exec(
-      "CREATE INDEX IF NOT EXISTS idx_codes_live ON codes(expires_at) WHERE uri != ''",
-    );
     this.insertStmt = this.db.prepare(
       'INSERT OR IGNORE INTO codes (code, uri, created_at, expires_at, retain_until) VALUES (?, ?, ?, ?, ?)',
     );
@@ -140,13 +144,9 @@ export class CodeStore implements CodeStoreLike {
     );
     // Guarded on the row, not on the caller's earlier read: only an unused,
     // unexpired row flips, so `changes` alone is the redeem verdict. `uri != ''`
-    // also holds back a lapsed row the sweep already wiped, should the clock
-    // step back below its `expires_at`.
+    // keeps a row from a wiped archive from ever being served as an empty invoice.
     this.consumeStmt = this.db.prepare(
-      "UPDATE codes SET uri = '', redeemed_at = ?1 WHERE code = ?2 AND redeemed_at IS NULL AND uri != '' AND expires_at > ?1",
-    );
-    this.scrubStmt = this.db.prepare(
-      "UPDATE codes SET uri = '' WHERE expires_at <= ? AND uri != ''",
+      "UPDATE codes SET redeemed_at = ?1 WHERE code = ?2 AND redeemed_at IS NULL AND uri != '' AND expires_at > ?1",
     );
     this.sweepStmt = this.db.prepare('DELETE FROM codes WHERE created_at <= ?');
     this.countStmt = this.db.prepare('SELECT COUNT(*) AS n FROM codes');
@@ -203,16 +203,15 @@ export class CodeStore implements CodeStoreLike {
     return { ok: false, reason: 'expired' };
   }
 
-  /** Wipe the invoice from lapsed rows; drop rows past the 24 h reuse window. */
+  /** Drop rows, invoice included, past the 24 h reuse window. */
   private purge(): void {
-    const now = this.now();
-    this.scrubStmt.run(now);
-    this.sweepStmt.run(now - CODE_REUSE_SECONDS);
+    this.sweepStmt.run(this.now() - CODE_REUSE_SECONDS);
   }
 
   /**
-   * Periodic hygiene: purge, then checkpoint so wiped invoices leave the `-wal`
-   * log too. Kept off the mint path - one fsync per sweep tick, not per mint.
+   * Periodic hygiene: purge, then checkpoint so deleted invoices leave the
+   * `-wal` log too. Kept off the mint path - one fsync per sweep tick, not per
+   * mint.
    */
   sweep(): void {
     this.purge();
@@ -220,9 +219,8 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Purge, then close (call on shutdown). Lapsed invoices are wiped so a
-   * decommissioned server's last file holds none; valid codes are untouched
-   * and survive the restart. Closing the last connection checkpoints the WAL.
+   * Purge, then close (call on shutdown). Codes and their invoices survive the
+   * restart. Closing the last connection checkpoints the WAL.
    */
   close(): void {
     this.purge();
@@ -263,7 +261,7 @@ export class CodeStore implements CodeStoreLike {
    * must not keep their URIs.
    */
   retire(): void {
-    this.scrubStmt.run(Number.MAX_SAFE_INTEGER);
+    this.db.exec(WIPE_URIS_SQL);
     this.db.close();
   }
 }
@@ -333,7 +331,7 @@ function scrubArchive(path: string): void {
   try {
     if (db.prepare('PRAGMA table_info(codes)').all().length === 0) return;
     db.exec('PRAGMA secure_delete = ON');
-    db.exec("UPDATE codes SET uri = '' WHERE uri != ''");
+    db.exec(WIPE_URIS_SQL);
   } finally {
     db.close();
   }
@@ -356,14 +354,18 @@ function scrubArchive(path: string): void {
 export class RotatingCodeStore implements CodeStoreLike {
   private current: CodeStore;
   private currentDay: string;
+  // Monotonic: a clock stepping back across midnight must not roll into
+  // yesterday's file, which was already wiped, and retire today's live one.
+  private readonly now: () => number;
 
   constructor(
     private readonly ttlSeconds: number,
     private readonly retainSeconds: number,
     private readonly maxEntries: number,
     private readonly basePath: string,
-    private readonly now: () => number = nowSeconds,
+    clock: () => number = nowSeconds,
   ) {
+    this.now = monotonic(clock);
     const bootAt = this.now();
     this.currentDay = utcDayKey(bootAt);
     this.current = this.openCurrent();
