@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 .env.local
+.env.audit-sink
 *.log
 .DS_Store
 # SQLite code store (+ WAL/SHM sidecars)
@@ -13,3 +14,6 @@ regby.db
 
 # Scratch notes - never commit
 regby*.txt
+
+# Database CA and other connection material
+certs/

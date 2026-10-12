@@ -6,6 +6,9 @@ import 'dotenv/config';
 import { getPublicKey } from 'nostr-tools/pure';
 import { hexToBytes } from 'nostr-tools/utils';
 import { CODE_REUSE_SECONDS } from './store.ts';
+import { intEnv, optional, required } from './env.ts';
+import { loadAuditToken } from './audit.ts';
+import type { AuditConfig } from './audit-sender.ts';
 
 export interface Config {
   /** 32-byte middleman secret key. */
@@ -41,25 +44,40 @@ export interface Config {
   storeMax: number;
   /** How long a malicious-request sender stays blacklisted (seconds). */
   blacklistSeconds: number;
+  /** External audit sink (see `audit-sender.ts`); null disables the audit. */
+  audit: AuditConfig | null;
   logLevel: string | undefined;
 }
 
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value || value.trim().length === 0) {
-    throw new Error(`Missing required env var ${name}`);
-  }
-  return value.trim();
-}
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
-function intEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new Error(`Env var ${name} must be a positive integer, got "${raw}"`);
+/** A dotless name such as `audit-sink`: a compose service on the host's private network, never public DNS. */
+const SERVICE_NAME_RE = /^[a-z0-9-]+$/i;
+
+/**
+ * The token and full invoices ride this connection, so plain http is allowed
+ * only to this machine: loopback, or a container beside the broker reached by
+ * its service name (docker-compose.audit.yml).
+ */
+function loadAuditConfig(): AuditConfig | null {
+  const raw = optional('REGBY_AUDIT_URL');
+  if (raw === null) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`REGBY_AUDIT_URL is not a URL: "${raw}"`);
   }
-  return n;
+  const local = LOOPBACK_HOSTS.has(url.hostname) || SERVICE_NAME_RE.test(url.hostname);
+  const secure = url.protocol === 'https:' || (url.protocol === 'http:' && local);
+  if (!secure) {
+    throw new Error('REGBY_AUDIT_URL must be https:// (http:// only to localhost or a compose service name)');
+  }
+  return {
+    url,
+    token: loadAuditToken(),
+    queueMax: intEnv('REGBY_AUDIT_QUEUE_MAX', 10_000),
+  };
 }
 
 const HEX64_RE = /^[0-9a-f]{64}$/i;
@@ -166,6 +184,7 @@ export function loadConfig(): Config {
     redeemFailMax: intEnv('REGBY_REDEEM_FAIL_MAX', 10),
     storeMax,
     blacklistSeconds: intEnv('REGBY_BLACKLIST_SECONDS', 86_400),
+    audit: loadAuditConfig(),
     logLevel: process.env.REGBY_LOG_LEVEL,
   };
 }

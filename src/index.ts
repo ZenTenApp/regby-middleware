@@ -3,10 +3,11 @@
  */
 import { resolve } from 'node:path';
 import { loadConfig } from './config.ts';
-import { configureLogger, errorMessage, logger } from './logger.ts';
+import { configureLogger, logger } from './logger.ts';
+import { onShutdown, runMain } from './process.ts';
 import { ReGBYBroker } from './server.ts';
 
-function main(): void {
+runMain(() => {
   const config = loadConfig();
   configureLogger(config.logLevel);
 
@@ -14,25 +15,13 @@ function main(): void {
     pubkey: config.publicKey,
     relays: config.relays,
     codeTtlSeconds: config.codeTtlSeconds,
+    // Host only: the path is the sink's business, the token never logged.
+    auditSink: config.audit?.url.host ?? null,
     // Absolute, so a deploy can confirm the store sits on the mounted volume.
     dbPath: resolve(config.dbPath),
   });
 
   const broker = new ReGBYBroker(config);
   broker.start();
-
-  const shutdown = (signal: string): void => {
-    logger.info('Shutting down', { signal });
-    broker.stop();
-    process.exit(0);
-  };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-}
-
-try {
-  main();
-} catch (err) {
-  logger.error('Fatal on boot', { message: errorMessage(err) });
-  process.exit(1);
-}
+  onShutdown(() => broker.stop());
+});

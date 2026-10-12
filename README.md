@@ -129,6 +129,22 @@ comes from the event signature alone, never from a successful decrypt.
   numbers nor cuts short a code minted at 23:59. Archived files keep no
   invoices: the roll wipes the file it leaves, and startup wipes every older
   file, so a server down across several midnights leaves none behind either.
+- **Audit log**: one record per request the server answered (or a guesser it
+  blacklisted), sent to a separate **audit sink** process that stores it in a
+  remote Postgres; nothing of it is kept on disk. Events: `code_issued`, `regby_busy`, `redeem`,
+  `redeem_refused` (`detail` = `expired` / `redeemed` / `not-found`),
+  `invalid_request` (`malformed`), `blacklisted` (`malicious` / `guessing`).
+  Each carries the server time, the **full** sender pubkey, the request event
+  id, the code, and `delivered` (did the reply reach a relay). A **served**
+  request also carries the full invoice and its earliest `valid_until`; a
+  refused payload is sent only as its length and an HMAC-SHA256 keyed with
+  `REGBY_AUDIT_TOKEN`, never as text: the token holder can match a merchant's
+  report against it, a leaked copy of the history alone can't.
+  Requests dropped before any work (blacklisted, rate-limited, undecryptable)
+  are not recorded. Delivery is best-effort: a bounded in-memory queue
+  (`REGBY_AUDIT_QUEUE_MAX`) retries with backoff while the sink is down and
+  drops the oldest records when full; a restart loses what is still queued.
+  Every column, event and reason: [docs/audit-events.md](docs/audit-events.md).
 - **Active deletion**: once a reply's `expiration` lapses, the server publishes a
   **NIP-09 `kind 5`** deletion for its own reply events (batched). NIP-40
   expiration is advisory - many relays ignore it - so we delete actively. Only the
@@ -231,6 +247,41 @@ container under `/app/YYYY/...` instead. Copy out each year folder with
 `docker cp regby:/app/YYYY ./data/` while the old container still exists, i.e.
 before `docker compose up` recreates it.
 
+### Audit sink
+
+Runs on the broker's machine as its own container; the history itself lives
+in a managed Postgres (table `events`, created on first start), never on this
+disk. The sink deletes records older than `REGBY_AUDIT_RETAIN_DAYS` (default
+365) and caps the table at `REGBY_AUDIT_MAX_ROWS` (oldest first). Only the
+sink container holds the database credentials: the broker appends through the
+token-guarded intake and can't read or delete history. TLS to the database is
+always verified against the provider's CA (`REGBY_AUDIT_DATABASE_CA`). **This
+is a payment history** (merchant and customer pubkeys, recipients, amounts):
+give the sink its own database role, and restrict access to the database and
+its backups like any customer database. Deleted rows stay in the provider's
+backups for their retention window.
+
+```bash
+cp .env.audit-sink.example .env.audit-sink   # set REGBY_AUDIT_TOKEN and the database URL
+mkdir -p certs && cp <provider-ca.pem> certs/db-ca.pem
+# in .env: REGBY_AUDIT_TOKEN = the same value as in .env.audit-sink
+docker compose -f docker-compose.yml -f docker-compose.audit.yml up -d --build
+```
+
+The broker reaches the sink by service name, `http://audit-sink:8787/events`
+(set by the compose file), on the compose network; no port is published. Each
+container keeps its own network, so a sink restart never takes the broker
+offline: the broker queues records and retries. Without the second `-f`, the
+broker runs with no audit. To make a plain `docker compose up -d --build`
+include the audit on a server, set
+`COMPOSE_FILE=docker-compose.yml:docker-compose.audit.yml` in its `.env`.
+
+```bash
+# everything that happened to one code
+psql "$REGBY_AUDIT_DATABASE_URL?sslmode=verify-full&sslrootcert=certs/db-ca.pem" \
+  -c "SELECT to_timestamp(ts), event, pubkey, detail, delivered FROM events WHERE code='48213907' ORDER BY ts"
+```
+
 ## Layout
 
 | file                | role                                              |
@@ -239,6 +290,10 @@ before `docker compose up` recreates it.
 | `src/config.ts`     | env loading, key decode, pubkey derivation        |
 | `src/nostr.ts`      | relay pool, NIP-04 encrypt/decrypt, publish       |
 | `src/store.ts`      | SQLite code → URI store (1-min validity, single-use, 1-h retention) + per-UTC-day file rotation |
+| `src/audit.ts`      | audit wire contract (record shape, validation, payload redaction) |
+| `src/audit-sender.ts` | broker side: bounded queue, batched POST (HTTPS, or http to a local sink), backoff |
+| `src/audit-sink/`   | the audit service: HTTP intake, Postgres history, retention |
+| `src/env.ts`        | env readers shared by both config loaders         |
 | `src/rate-limit.ts` | per-pubkey sliding window                         |
 | `src/blacklist.ts`  | 24h block list for malicious senders              |
 | `src/deletion-queue.ts` | tracks own reply ids → due NIP-09 deletions   |

@@ -6,6 +6,7 @@ import {
   extractIntent,
   parseInbound,
   isValidPaymentUri,
+  validUntilOf,
   DEFITO_PREFIX,
   MAX_PAYLOAD_LINES,
   REPLY_REASON,
@@ -507,4 +508,18 @@ const PARITY_REPLY_REASONS: readonly string[] = [
 
 test('parity: every failure reason this server sends is on the app allowlist', () => {
   assert.deepEqual(Object.values(REPLY_REASON), PARITY_REPLY_REASONS);
+});
+
+test('validUntilOf: earliest well-formed valid_until across rails, for the audit', () => {
+  const rail = (until: string): string =>
+    `defito://base/0xabc&amount=USDT:1&order_id=${ORDER}&valid_until=${until}&nostr=${NPUB}`;
+  assert.equal(validUntilOf(rail('1795219200')), 1795219200);
+  // Ranked rails can disagree; the request lapses with the first of them.
+  assert.equal(validUntilOf(`${rail('1795219300')}\n${rail('1795219200')}`), 1795219200);
+  // A malformed value is skipped, never read as a number.
+  assert.equal(validUntilOf(`${rail('soon')}\n${rail('1795219300')}`), 1795219300);
+  assert.equal(validUntilOf(rail('0')), null);
+  assert.equal(validUntilOf('defito://base/0xabc&amount=USDT:1&order_id=x'), null);
+  // A foreign scheme is never read as an invoice.
+  assert.equal(validUntilOf('evil://xxxxbase/0x&valid_until=1795219200'), null);
 });

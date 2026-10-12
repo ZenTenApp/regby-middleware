@@ -3,6 +3,7 @@ dist
 .git
 .env
 .env.local
+.env.audit-sink
 data
 *.db
 *.db-wal
@@ -10,3 +11,4 @@ data
 *.log
 *.txt
 .DS_Store
+certs

@@ -23,8 +23,13 @@ import {
   REPLY_INTENT,
   REPLY_REASON,
   type InboundMessage,
+  type OutboundIntent,
 } from './protocol.ts';
+import { HttpAuditSink, NO_AUDIT, type AuditEntry, type AuditSink } from './audit-sender.ts';
 import { logger } from './logger.ts';
+
+/** What a call site adds to an audit record; the target supplies the rest. */
+type AuditFields = Omit<AuditEntry, 'pubkey' | 'requestEvent'>;
 
 /** Remember processed event ids so a relay re-delivery can't double-mint. */
 const SEEN_MAX = 50_000;
@@ -50,6 +55,7 @@ export class ReGBYBroker {
   // Per-sender not-found redeem strikes; exceeding the cap blacklists a guesser.
   private readonly redeemFails: RateLimiter;
   private readonly blacklist: Blacklist;
+  private readonly auditSink: AuditSink;
   private readonly seen = new BoundedMap<string, true>(SEEN_MAX);
   private subscription: { close: () => void } | null = null;
   private sweepTimer: NodeJS.Timeout | null = null;
@@ -72,6 +78,7 @@ export class ReGBYBroker {
     this.redeemLimiter = new RateLimiter(config.redeemRateMax, config.redeemRateWindowSeconds);
     this.redeemFails = new RateLimiter(config.redeemFailMax, config.redeemRateWindowSeconds);
     this.blacklist = new Blacklist(config.blacklistSeconds);
+    this.auditSink = config.audit ? new HttpAuditSink(config.audit) : NO_AUDIT;
   }
 
   start(): void {
@@ -94,11 +101,13 @@ export class ReGBYBroker {
     logger.info('Broker started', { pubkey: this.config.publicKey });
   }
 
-  stop(): void {
+  /** Async only for the audit's last flush; everything else closes at once. */
+  async stop(): Promise<void> {
     this.subscription?.close();
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.transport.close();
     this.store.close();
+    await this.auditSink.close();
     logger.info('Broker stopped');
   }
 
@@ -158,7 +167,8 @@ export class ReGBYBroker {
       // A `malformed` payload was `defito://` but omitted a required
       // field, which is a broken client - telling them is the useful response,
       // and a 24 h lockout would just make a POS bug look like an outage.
-      if (parsed.reason === 'malicious') {
+      const malicious = parsed.reason === 'malicious';
+      if (malicious) {
         // Aiming a foreign scheme at us after proving they hold the
         // conversation key is deliberate. Block the sender and tell them once.
         this.blacklist.block(event.pubkey);
@@ -171,7 +181,11 @@ export class ReGBYBroker {
       // Neither verdict arises for request_regby_content, so the failure
       // reuses request_regby_code's success intent (`regby_code`); the
       // non-code content reads as an error.
-      await this.transport.reply(target, REPLY_INTENT.request_regby_code, REPLY_REASON.invalid);
+      await this.answer(target, REPLY_INTENT.request_regby_code, REPLY_REASON.invalid, {
+        event: malicious ? 'blacklisted' : 'invalid_request',
+        detail: parsed.reason,
+        refusedPayload: plaintext,
+      });
       return;
     }
 
@@ -209,18 +223,21 @@ export class ReGBYBroker {
       const minted = this.store.mint(message.uri, this.clampStart(createdAt));
       if (!minted) {
         logger.warn('Mint failed (store full / no free code)', { size: this.store.size });
-        await this.transport.reply(
-          target,
-          REPLY_INTENT.request_regby_code,
-          REPLY_REASON.busy,
-        );
+        await this.answer(target, REPLY_INTENT.request_regby_code, REPLY_REASON.busy, {
+          event: 'regby_busy',
+          uri: message.uri,
+        });
         return;
       }
       logger.info('Minted code', {
         from,
         expiresAt: minted.expiresAt,
       });
-      await this.transport.reply(target, REPLY_INTENT.request_regby_code, minted.code);
+      await this.answer(target, REPLY_INTENT.request_regby_code, minted.code, {
+        event: 'code_issued',
+        code: minted.code,
+        uri: message.uri,
+      });
       return;
     }
 
@@ -243,16 +260,18 @@ export class ReGBYBroker {
         logger.warn('Blacklisted sender - repeated code guessing', {
           from,
         });
+        this.audit(target, { event: 'blacklisted', code: message.code, detail: 'guessing' });
         return;
       }
       logger.info('Redeem rejected', {
         from,
         reason: result.reason,
       });
-      await this.transport.reply(
+      await this.answer(
         target,
         REPLY_INTENT.request_regby_content,
         REDEEM_FAILURE_REPLY[result.reason],
+        { event: 'redeem_refused', code: message.code, detail: result.reason },
       );
       return;
     }
@@ -260,15 +279,39 @@ export class ReGBYBroker {
     // Consume-before-publish is the at-most-once order, so a reply no relay
     // took has already burnt the code: the customer's retry is refused and the
     // merchant must re-mint. Surface it, or it looks like user error.
-    const delivered = await this.transport.reply(
-      target,
-      REPLY_INTENT.request_regby_content,
-      result.uri,
-    );
+    const delivered = await this.answer(target, REPLY_INTENT.request_regby_content, result.uri, {
+      event: 'redeem',
+      code: message.code,
+      uri: result.uri,
+    });
     if (!delivered) {
       logger.warn('Code consumed but its reply reached no relay', {
         from,
       });
     }
+  }
+
+  /**
+   * Reply, then record the request with whether the reply reached a relay: one
+   * record per answered request, so a reply no relay took keeps its invoice
+   * and code on record (for a redeem, the code is already burnt).
+   */
+  private async answer(
+    target: ReplyTarget,
+    intent: OutboundIntent,
+    content: string,
+    fields: AuditFields,
+  ): Promise<boolean> {
+    const delivered = await this.transport.reply(target, intent, content);
+    this.audit(target, { ...fields, delivered });
+    return delivered;
+  }
+
+  private audit(target: ReplyTarget, fields: AuditFields): void {
+    this.auditSink.record({
+      ...fields,
+      pubkey: target.recipientPubkey,
+      requestEvent: target.requestEventId,
+    });
   }
 }
