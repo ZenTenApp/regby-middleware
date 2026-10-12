@@ -1,0 +1,151 @@
+# Test, then deploy main to the server: knock the firewall open, SSH in,
+# fast-forward the checkout to the tested commit and rebuild with docker
+# compose. Which services start (broker alone, or broker + audit sink) is the
+# server's call, through COMPOSE_FILE in its .env (see README "Audit sink").
+#
+# Secrets (Settings > Environments > production):
+#   DEPLOY_HOST          server IP or hostname
+#   DEPLOY_USER          SSH user, in the docker group
+#   DEPLOY_SSH_KEY       private key for that user (ed25519, no passphrase)
+#   DEPLOY_KNOWN_HOSTS   pinned host key line(s): after knocking, run
+#                        `ssh-keyscan -p <ssh port> <host>` from a trusted machine
+#   DEPLOY_SSH_PORT      SSH port behind the knock
+#   DEPLOY_KNOCK_PORTS   knock sequence, space separated, in order (TCP)
+#   DEPLOY_PATH          absolute path of the repo checkout on the server
+# The port values are secrets on purpose: a knock sequence anyone with repo
+# read access can see no longer hides the SSH port.
+#
+# Server firewall: accept ESTABLISHED,RELATED before the knock rule, or the SSH
+# session drops when the knock window closes in the middle of a long build.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; a newer push waits for the running one, never cancels it mid-rebuild.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  deploy:
+    needs: test
+    # A manual run from another branch would test that branch but ship main.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    env:
+      HOST: ${{ secrets.DEPLOY_HOST }}
+      SSH_USER: ${{ secrets.DEPLOY_USER }}
+      SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+      KNOCK_PORTS: ${{ secrets.DEPLOY_KNOCK_PORTS }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+    steps:
+      - name: Check secrets and install SSH keys
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          # A missing secret is an empty string: fail here, by name, not as a
+          # silent no-op knock or an `ssh -p ""` error three attempts later.
+          : "${HOST:?DEPLOY_HOST not set}" "${SSH_USER:?DEPLOY_USER not set}" \
+            "${SSH_PORT:?DEPLOY_SSH_PORT not set}" "${KNOCK_PORTS:?DEPLOY_KNOCK_PORTS not set}" \
+            "${DEPLOY_PATH:?DEPLOY_PATH not set}" "${SSH_KEY:?DEPLOY_SSH_KEY not set}" \
+            "${KNOWN_HOSTS:?DEPLOY_KNOWN_HOSTS not set}"
+          # The path travels through the server's login shell unquoted, so
+          # allow only characters no shell treats specially.
+          if ! [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+            echo "::error::DEPLOY_PATH must be a plain absolute path"
+            exit 1
+          fi
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+
+      - name: Write the server-side deploy script
+        run: |
+          cat > "$RUNNER_TEMP/deploy.sh" <<'REMOTE'
+          set -euo pipefail
+          deploy_path=$1
+          sha=$2
+          cd "$deploy_path"
+          git fetch --quiet origin main
+          git checkout --quiet main
+          # The tested commit, not whatever main is now: a newer push gets its
+          # own run after its own tests. Fast-forward only, so a diverged
+          # checkout stops the deploy, and an older sha is a no-op.
+          git merge --ff-only --quiet "$sha"
+          echo "Deploying $(git rev-parse --short HEAD)"
+          docker compose up -d --build
+
+          # A service that fails at boot exits and restarts in a loop. `up`
+          # recreated every changed container with RestartCount 0, so after a
+          # grace period (covering the sink's database connect) anything not
+          # running, or restarted since, failed this deploy.
+          sleep 15
+          docker compose ps -a --format '{{.Service}}: {{.State}} ({{.Status}})'
+          ids=$(docker compose ps -aq)
+          if [ -z "$ids" ]; then
+            echo "Deploy failed: no containers" >&2
+            exit 1
+          fi
+          bad=$(docker inspect -f '{{.Name}} {{.State.Status}} {{.RestartCount}}' $ids \
+            | awk '$2 != "running" || $3 > 0')
+          if [ -n "$bad" ]; then
+            echo "Deploy failed, not healthy: $bad" >&2
+            docker compose logs --tail 50
+            exit 1
+          fi
+
+          # Only after the check: until the new image is proven, the old one
+          # stays available for a manual rollback.
+          docker image prune -f >/dev/null
+          REMOTE
+
+      - name: Knock and deploy
+        run: |
+          knock() {
+            for port in $KNOCK_PORTS; do
+              # A SYN is all the knock daemon needs; the port itself stays closed.
+              # Keep -w at 1: a slower SYN retransmit could reorder the sequence.
+              nc -z -w 1 "$HOST" "$port" || true
+              sleep 0.5
+            done
+          }
+
+          # One knock, one connection per attempt: a second knock on a toggle
+          # sequence would close the port again. ssh exits 255 only when it
+          # can't connect or authenticate; any other code is the deploy
+          # script's own result and ends the step.
+          for attempt in 1 2 3; do
+            knock
+            rc=0
+            ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" \
+              -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=10 \
+              -o ServerAliveInterval=30 "$SSH_USER@$HOST" \
+              bash -s -- "$DEPLOY_PATH" "$GITHUB_SHA" < "$RUNNER_TEMP/deploy.sh" || rc=$?
+            if [ "$rc" -ne 255 ]; then exit "$rc"; fi
+            echo "SSH not reachable (attempt $attempt), knocking again"
+            sleep 3
+          done
+          echo "::error::SSH stayed closed after knocking"
+          exit 1
