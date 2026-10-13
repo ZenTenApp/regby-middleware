@@ -42,7 +42,7 @@ export interface Config {
    * as a code-guesser (expired redeems don't count - those are real lapsed codes). */
   redeemFailMax: number;
   storeMax: number;
-  /** How long a malicious-request sender stays blacklisted (seconds). */
+  /** How long a code guesser stays blacklisted (seconds). */
   blacklistSeconds: number;
   /** External audit sink (see `audit-sender.ts`); null disables the audit. */
   audit: AuditConfig | null;

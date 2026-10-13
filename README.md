@@ -1,9 +1,13 @@
 # regby-middleware
 
-Nostr middleman broker for **ReGBY** - BLIK-style coded payment requests for the
-zenten-pay wallet. A merchant encrypts a `defito://` request to this server's
-npub; the server mints a short **8-digit code** and returns it. A customer
-redeems the code; the server returns the original URI.
+Nostr middleman broker for **ReGBY** - BLIK-style codes for the zenten-pay
+wallet. ReGBY is a **transport**: one peer (the merchant) encrypts any text to
+this server's npub - a `defito://` request, anything else, or nothing at all.
+The server never reads it. It mints a short **8-digit
+code** and returns it. Another peer (the customer) redeems the code; the server
+returns the original content, then **pairs the two peers**: the customer learns
+who the content came from (`from`) and the merchant who received it
+(`deliver_to`).
 
 A `defifrom://` payment **confirmation** never passes through here. It is sent
 straight to the npub named in the invoice it answers, so there is nothing for a
@@ -19,8 +23,11 @@ See [`src/flow-examples.md`](src/flow-examples.md) for full event examples.
 ## Protocol
 
 Encrypted **DM (kind 4)**. `content` is the **raw value** (NIP-04 ciphertext on
-the wire): a `defito://` URI (possibly multi-line / multi-option) or the bare
-eight-digit code - no JSON wrapper.
+the wire): the sender's content, any text up to 4096 characters (empty
+included), or the bare eight-digit code - no JSON wrapper. **Judging the
+content is the recipient's job**: a `defito://` invoice is validated by the
+wallet that receives it, never by this server. The only content refused here
+is binary (see Behaviour).
 
 NIP-04 is the required scheme on this kind, in both directions. It is
 deprecated and unauthenticated, and it is what every client reading these
@@ -29,81 +36,75 @@ side reports as broken, it is one it never sees. Sender authenticity therefore
 comes from the event signature alone, never from a successful decrypt.
 
 - **Intent** rides the `['i', <intent>]` tag (single-letter → relay-indexable):
-  `request_regby_code` / `regby_code` / `request_regby_content` / `regby_content`.
+  `request_regby_code` / `regby_code` / `request_regby_content` / `regby_content`,
+  plus `regby_redeemed`, the server's notice to the merchant after a redeem.
 - **No `error` intent**: a failure reuses the request's success intent
   (`regby_code` for a `request_regby_code`, `regby_content` for a
-  `request_regby_content`) and carries the reason string in `content`. The client tells a value from an error by the content's **shape**
-  (8 digits / a `defito://` prefix) and whitelist-sanitises anything else - the
-  middleman is untrusted, so a free error-text channel was a hole into the UI.
+  `request_regby_content`) and carries one of the fixed `REPLY_REASON`
+  strings in `content`. The client whitelist-sanitises any reason it shows -
+  the middleman is untrusted, so a free error-text channel was a hole into the
+  UI. Content is any text, so its shape no longer tells a value from an
+  error. The signal is the **`from` tag**: a successful `regby_content`
+  always carries it, a failure never does. (Codes minted before origins were
+  stored redeem without it; they last at most the 1-minute code life after
+  the deploy.) A `regby_code` value is always eight digits.
 - **Correlation** is the `['e', <request-event-id>]` reply tag - the client
   matches a reply to the request it published. No in-band id.
 - **Routing**: `['p', recipientHex]`. **Retention**: `['expiration', unixSec]`
-  (NIP-40) = `created_at + 1 h` on every event - a maintenance/retention buffer
+  (NIP-40) = `created_at + REGBY_EVENT_EXPIRY_SECONDS` (default 72 h less a
+  minute, the DM relays' cap) on every event - a maintenance/retention buffer
   only, unrelated to code validity.
 
 | direction          | `i` tag                 | `content` (decrypted)        |
 | ------------------ | ----------------------- | ---------------------------- |
-| merchant → server  | `request_regby_code`    | `defito://…` URI             |
+| merchant → server  | `request_regby_code`    | any text (e.g. `defito://…`) |
 | server → merchant  | `regby_code`            | `42891337` *or* reason       |
 | customer → server  | `request_regby_content` | `42891337`                   |
-| server → customer  | `regby_content`         | `defito://…` URI *or* reason |
+| server → customer  | `regby_content`         | that text *or* reason        |
+| server → merchant  | `regby_redeemed`        | `42891337`                   |
+
+After a successful redeem the customer's `regby_content` also carries
+`['from', <merchant npub>]`, and the server sends the merchant `regby_redeemed`
+with `['e', <merchant's request id>]` and `['deliver_to', <customer npub>]`,
+whether or not the customer's reply reached a relay (the code is used up
+either way). The merchant npub is the key that signed the request, not the
+invoice's own `nostr=`. **These tags are plaintext**: anyone reading the relay
+sees which merchant and customer met. A refused redeem sends neither.
+
+Empty content is a valid `request_regby_code` payload and runs the same five
+events: the customer's `regby_content` carries an (encrypted) empty string, and
+the `from` / `deliver_to` tags pair the two peers. Whitespace-only content is
+still dropped as noise.
 
 ## Behaviour
 
-- **request_regby_code** → validate every line is a `defito://` invoice, mint a
-  unique 8-digit code, store
-  `code → { uri, expiresAt, retainUntil }`, reply `i:regby_code` with the requester's
+- **request_regby_code** → mint a unique 8-digit code for the content as sent
+  (verbatim, not trimmed), store
+  `code → { content, expiresAt, retainUntil, merchant, request event }`, reply `i:regby_code` with the requester's
   event id in `e`. **Code validity (1 min) is anchored to the request
   event's `created_at`**, not server receive-time, so the merchant POS and the
   server count down from the same origin - the merchant already knows that
   timestamp (it signed the event), so no echo is needed. `created_at` is
   skew-clamped (`REGBY_CLOCK_SKEW_SECONDS`) to stop a forged future/stale stamp
   from gaming expiry.
-- Two ways a `request_regby_code` is refused, and they differ by what they cost the
-  sender. A payload that is **not `defito://`** is deliberate (the sender proved
-  they hold the conversation key), so the server replies `i:regby_code` with
-  `Invalid Request` and **blacklists them for 24 h** (`REGBY_BLACKLIST_SECONDS`).
-  A `defito://` payload the **wallet would refuse at redeem** gets the same
-  reply and **no blacklist**: that is a broken client, and a day-long lockout
-  would make a POS bug look like an outage. Undecryptable noise and malformed
-  codes are still dropped silently, and so is **binary content**: NIP-04
-  decrypt decodes UTF-8 leniently, so encrypted bytes (an image, a file) arrive
-  as text carrying `U+FFFD` or NUL/control characters. Any of those, other
-  than tab and line breaks, drops the event before every other screen, with no
-  reply and nothing stored (logged as `Binary content - dropping`).
-- What earns that softer refusal is exactly what the wallet screens, mirrored
-  field for field: a missing `<networks>/<recipients>`, `amount=`, `order_id=`
-  or decodable `nostr=<npub>`; a missing or malformed `valid_until=` (unix
-  seconds as a plain positive integer - whether it has PASSED is the wallet's
-  call, on its own clock); an `amount=` whose shape is broken (`USDT:` is a
-  truncated amount, `:5` names no coin); hidden, bidi or markup characters
-  anywhere in the payload, read both as written and as the wallet will decode
-  them; and more than 20 lines, past which the wallet drops the surplus and
-  would show a request the merchant never wrote. The payload is judged
-  **trimmed**, as the wallet judges it, and `nostr=` is read as leniently
-  (a `nostr:` prefix and any casing decode the same). A payload that passes
-  here and fails there is an eight-digit code that mints and never redeems,
-  with no reason the merchant can act on, so `src/protocol.test.ts` pins the
-  accepted and refused fixtures against the app's copy of the same list.
-- A multi-line payload needs **one** redeemable rail, not every rail. The
-  wallet drops a line it cannot parse and pays from the rest, so refusing the
-  whole payload here costs the merchant a code the customer could have paid
-  over a rail the wallet was never going to show. An empty `defito://` rail is
-  likewise a broken client, never a foreign scheme: it must not earn the
-  blacklist.
-- Nothing past that is validated here, on purpose. Chain names, coin symbols,
-  address formats and amount values come from a stablecoin registry that updates
-  without a server deploy, so a list frozen here would start refusing valid
-  payloads the day a chain is added. `order_id` is likewise opaque: we check it
-  is present, never what it contains. The wallet re-validates all of it at
-  redeem, where the registry lives - and must anyway, since this server is
-  untrusted and nothing it approves is a safety guarantee.
-- **request_regby_content** → look up the code. Valid → reply `i:regby_content` with the URI.
+- **Content is opaque.** Any text is minted, whatever it says: a `defito://`
+  invoice, a foreign scheme, plain text, whitespace or nothing. There is no
+  `Invalid Request` and no blacklist for content any more. What is dropped
+  silently, with no reply and nothing stored: content over 4096 characters,
+  undecryptable noise, and **binary content**: NIP-04 decrypt decodes UTF-8
+  leniently, so encrypted bytes (an image, a file) arrive as text carrying
+  `U+FFFD` or NUL/control characters. Any of those, other than tab and line
+  breaks, drops the event (logged as `Binary content - dropping`).
+- **The recipient validates.** The wallet re-validates a `defito://` invoice
+  at redeem, where its registry lives, and must screen any content it renders
+  (hidden, bidi or markup characters included): this server is untrusted and
+  now approves nothing.
+- **request_regby_content** → look up the code. Valid → reply `i:regby_content` with the content.
   **Single-use**: the first successful redeem consumes the code. A code
   expires after 1 min or its first use, whichever comes first. The live file
-  keeps every code's URI, used or lapsed, until the row is deleted 24 h after
+  keeps every code's content, used or lapsed, until the row is deleted 24 h after
   issue, so recent codes can be debugged straight from the db; day rotation
-  wipes every URI left in the outgoing file. Consume happens before the reply is
+  wipes every content left in the outgoing file. Consume happens before the reply is
   published, so a reply no relay accepted still burns the code (logged as a
   warning); the merchant re-mints. While the row is **retained** (within 1 h of
   the merchant's request): already redeemed → `i:regby_content` `Code Already Redeemed`
@@ -132,19 +133,20 @@ comes from the event signature alone, never from a successful decrypt.
 - **Audit log**: one record per request the server answered (or a guesser it
   blacklisted), sent to a separate **audit sink** process that stores it in a
   remote Postgres; nothing of it is kept on disk. Events: `code_issued`, `regby_busy`, `redeem`,
-  `redeem_refused` (`detail` = `expired` / `redeemed` / `not-found`),
-  `invalid_request` (`malformed`), `blacklisted` (`malicious` / `guessing`).
+  `redeem_refused` (`reason` = `expired` / `redeemed` / `not-found`),
+  `blacklisted` (`guessing`), `merchant_notified`.
   Each carries the server time, the **full** sender pubkey, the request event
   id, the code, and `delivered` (did the reply reach a relay). A **served**
-  request also carries the full invoice and its earliest `valid_until`; a
-  refused payload is sent only as its length and an HMAC-SHA256 keyed with
-  `REGBY_AUDIT_TOKEN`, never as text: the token holder can match a merchant's
-  report against it, a leaked copy of the history alone can't.
+  request also carries the full content.
   Requests dropped before any work (blacklisted, rate-limited, undecryptable)
   are not recorded. Delivery is best-effort: a bounded in-memory queue
   (`REGBY_AUDIT_QUEUE_MAX`) retries with backoff while the sink is down and
   drops the oldest records when full; a restart loses what is still queued.
   Every column, event and reason: [docs/audit-events.md](docs/audit-events.md).
+  On its first start after the content change, the sink renames `uri` →
+  `content` and `detail` → `reason` and **drops** `valid_until`,
+  `payload_hmac` and `payload_length` (every later start is a no-op). Take a
+  `pg_dump` first if those old values matter.
 - **Active deletion**: once a reply's `expiration` lapses, the server publishes a
   **NIP-09 `kind 5`** deletion for its own reply events (batched). NIP-40
   expiration is advisory - many relays ignore it - so we delete actively. Only the
@@ -175,18 +177,18 @@ comes from the event signature alone, never from a successful decrypt.
 - Global redeem rate ceiling (`REGBY_REDEEM_RATE_MAX`) plus per-sender
   not-found strikes (`REGBY_REDEEM_FAIL_MAX` → blacklist): bounds code-space
   enumeration / URI harvesting even by an attacker rotating fresh pubkeys.
-- 24 h blacklist for senders that submit a malicious `request_regby_code`.
 - Code-TTL anchor (`created_at`) skew-clamped so expiry can't be gamed.
 - Store capacity cap (`REGBY_STORE_MAX`, codes issued in any 24 h) - mints past
   it reply `i:regby_code` with `Service Busy, Try Again` (a reason, not a code).
 - Processed event ids are remembered so a relay re-delivery can't double-mint.
-- Strict content validation; length caps.
-- Decrypted URIs / live codes are logged only at `debug`.
+- Length cap (4096 characters) and a binary screen; no other content checks.
+- Decrypted content / live codes are logged only at `debug`.
 
 > **Trust note.** For 24 h after issue the server's live file holds the
-> plaintext `defito://` URI, so a compromised server could hand the customer a different
-> recipient. The customer still confirms recipient + amount on-device before
-> signing. Future hardening (out of scope): merchant signs the URI, customer
+> plaintext content, so a compromised server could hand the customer different
+> content (for an invoice, a different recipient). The recipient must treat
+> every content as untrusted: the wallet still validates an invoice and the
+> customer confirms recipient + amount on-device before signing. Future hardening (out of scope): merchant signs the URI, customer
 > verifies against the merchant npub.
 
 ## Run
@@ -279,23 +281,23 @@ include the audit on a server, set
 ```bash
 # everything that happened to one code
 psql "$REGBY_AUDIT_DATABASE_URL?sslmode=verify-full&sslrootcert=certs/db-ca.pem" \
-  -c "SELECT to_timestamp(ts), event, pubkey, detail, delivered FROM events WHERE code='48213907' ORDER BY ts"
+  -c "SELECT to_timestamp(ts), event, pubkey, reason, delivered FROM events WHERE code='48213907' ORDER BY ts"
 ```
 
 ## Layout
 
 | file                | role                                              |
 | ------------------- | ------------------------------------------------- |
-| `src/protocol.ts`   | intent/tag + raw-content validation (mirrors app) |
+| `src/protocol.ts`   | intents, tags, envelope checks (binary, size, code shape) |
 | `src/config.ts`     | env loading, key decode, pubkey derivation        |
 | `src/nostr.ts`      | relay pool, NIP-04 encrypt/decrypt, publish       |
-| `src/store.ts`      | SQLite code → URI store (1-min validity, single-use, 1-h retention) + per-UTC-day file rotation |
-| `src/audit.ts`      | audit wire contract (record shape, validation, payload redaction) |
+| `src/store.ts`      | SQLite code → content + origin store (1-min validity, single-use, 1-h answer window, 24-h row) + per-UTC-day file rotation |
+| `src/audit.ts`      | audit wire contract (record shape, validation)    |
 | `src/audit-sender.ts` | broker side: bounded queue, batched POST (HTTPS, or http to a local sink), backoff |
 | `src/audit-sink/`   | the audit service: HTTP intake, Postgres history, retention |
 | `src/env.ts`        | env readers shared by both config loaders         |
 | `src/rate-limit.ts` | per-pubkey sliding window                         |
-| `src/blacklist.ts`  | 24h block list for malicious senders              |
+| `src/blacklist.ts`  | 24h block list for code guessers                  |
 | `src/deletion-queue.ts` | tracks own reply ids → due NIP-09 deletions   |
 | `src/server.ts`     | broker: dedup, dispatch request_regby_code/request_regby_content  |
 | `src/index.ts`      | entry + graceful shutdown                         |

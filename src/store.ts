@@ -1,7 +1,8 @@
 /**
- * SQLite-backed code store. Maps an 8-digit code to the merchant's payment-request
- * URI, persisted so codes survive a server restart (the previous in-memory Map
- * lost every code on reboot - a restart used to make all codes unredeemable).
+ * SQLite-backed code store. Maps an 8-digit code to the merchant's content (a
+ * payment-request URI, or empty) and who asked for it, persisted so codes
+ * survive a server restart (the previous in-memory Map lost every code on
+ * reboot - a restart used to make all codes unredeemable).
  *
  * Validity timestamps per row, both anchored to the merchant request's own
  * `created_at` (skew-clamped by the caller, passed in as `startedAt`):
@@ -11,9 +12,12 @@
  *     a lapsed code still reports `expired` (clear UX: "the code was real but
  *     lapsed"); past it, `not-found`.
  *
- * Two more columns: `created_at` = the server wall-clock at mint, which never
- * decides validity but does decide when the number may be reused (below), and
- * `redeemed_at` = when the code was redeemed, NULL until then.
+ * More columns: `created_at` = the server wall-clock at mint, which never
+ * decides validity but does decide when the number may be reused (below),
+ * `redeemed_at` = when the code was redeemed, NULL until then, and the code's
+ * origin (`merchant_pubkey`, `request_event`): who asked for it and with which
+ * event, so a redeem can name the merchant to the customer and notify the
+ * merchant on their own request thread.
  *
  * **No reuse for 24 h**: a row is DELETED only `CODE_REUSE_SECONDS` (24 h) after
  * its `created_at`, so the primary key keeps that number out of every mint until
@@ -28,11 +32,11 @@
  * `monotonic`, so a wall clock stepping backward can't revive a lapsed code
  * either (within one process).
  *
- * **Invoices stay for debugging**: a row keeps its `uri` until it is deleted
- * with the row, 24 h after issue, so the live file shows what every recent
- * code was for. Deleted rows are zeroed (`secure_delete`) and the sweep
+ * **Content stays for debugging**: a row keeps its content and origin until it is
+ * deleted with the row, 24 h after issue, so the live file shows what every
+ * recent code was for. Deleted rows are zeroed (`secure_delete`) and the sweep
  * checkpoints the WAL so their page images leave the `-wal` log too. Archived
- * daily files keep no invoice: rotation and startup wipe them (below).
+ * daily files keep neither: rotation and startup wipe them (below).
  *
  * `node:sqlite`'s synchronous API matches this single-process, single-loop
  * server - no async driver, no extra dependency.
@@ -52,13 +56,23 @@ export interface MintResult {
   expiresAt: number;
 }
 
+/** Who asked for a code: the merchant, by signed pubkey, and their request event. */
+export interface CodeOrigin {
+  /** Hex pubkey that signed the `request_regby_code`, never the invoice's own claim. */
+  merchantPubkey: string;
+  requestEvent: string;
+}
+
 export type RedeemFailureReason = 'not-found' | 'expired' | 'redeemed';
 
-export type RedeemResult = { ok: true; uri: string } | { ok: false; reason: RedeemFailureReason };
+/** `origin` is null only for a code minted before origins were stored. */
+export type RedeemResult =
+  | { ok: true; content: string; origin: CodeOrigin | null }
+  | { ok: false; reason: RedeemFailureReason };
 
 /** Shared surface of `CodeStore` and its rotating wrapper - the broker's seam. */
 export interface CodeStoreLike {
-  mint(uri: string, startedAt: number): MintResult | null;
+  mint(content: string, startedAt: number, origin: CodeOrigin): MintResult | null;
   redeem(code: string): RedeemResult;
   sweep(): void;
   readonly size: number;
@@ -66,23 +80,51 @@ export interface CodeStoreLike {
 }
 
 interface CodeRow {
-  uri: string;
+  /** The opaque content; the column predates content being more than a URI. */
+  content: string;
   expires_at: number;
   retain_until: number;
   redeemed_at: number | null;
+  merchant_pubkey: string | null;
+  request_event: string | null;
 }
 
 /**
- * Daily files written before `redeemed_at` existed lack the column, and
- * `CREATE TABLE IF NOT EXISTS` never alters an existing table. Their rows read
- * as never redeemed: the old build marked a use only by pulling `expires_at` to
- * now, so a code consumed before the upgrade answers `expired`, not `redeemed`,
- * for the rest of its answer window.
+ * Nullable columns added after the table first shipped. `CREATE TABLE IF NOT
+ * EXISTS` never alters an existing daily file, so each is added on open, and a
+ * file copied from (`carryFrom`) may still lack them. Old rows read NULL:
+ *   - `redeemed_at`: never redeemed. The old build marked a use only by pulling
+ *     `expires_at` to now, so a code consumed before the upgrade answers
+ *     `expired`, not `redeemed`, for the rest of its answer window.
+ *   - origin: unknown, so its redeem names no merchant and notifies none.
  */
-function addRedeemedAtColumn(db: DatabaseSync): void {
-  const columns = db.prepare('PRAGMA table_info(codes)').all() as { name: string }[];
-  if (columns.some((c) => c.name === 'redeemed_at')) return;
-  db.exec('ALTER TABLE codes ADD COLUMN redeemed_at INTEGER');
+const LATE_COLUMNS = {
+  redeemed_at: 'INTEGER',
+  merchant_pubkey: 'TEXT',
+  request_event: 'TEXT',
+} as const;
+
+function columnNames(db: DatabaseSync, schema: string): Set<string> {
+  const rows = db.prepare(`PRAGMA ${schema}.table_info(codes)`).all() as { name: string }[];
+  return new Set(rows.map((r) => r.name));
+}
+
+/**
+ * Bring an existing daily file to the current schema: `uri` (from when content
+ * was always an invoice) becomes `content`, and any late column is added.
+ * Idempotent, and a no-op on a file this build created.
+ */
+function upgradeSchema(db: DatabaseSync): void {
+  const have = columnNames(db, 'main');
+  if (have.has('uri')) {
+    // Both names means a hand-edited file; every mint would then fail on the
+    // NOT NULL `uri`. Refuse to open it instead of failing request by request.
+    if (have.has('content')) throw new Error('codes has both uri and content columns; fix the file by hand');
+    db.exec('ALTER TABLE codes RENAME COLUMN uri TO content');
+  }
+  for (const [name, type] of Object.entries(LATE_COLUMNS)) {
+    if (!have.has(name)) db.exec(`ALTER TABLE codes ADD COLUMN ${name} ${type}`);
+  }
 }
 
 /**
@@ -91,8 +133,12 @@ function addRedeemedAtColumn(db: DatabaseSync): void {
  */
 export const CODE_REUSE_SECONDS = 86_400;
 
-/** Empties every invoice in a file leaving service (rotation, startup scrub). */
-const WIPE_URIS_SQL = "UPDATE codes SET uri = '' WHERE uri != ''";
+/** A row knows who asked for it: both origin columns are set (they are written together). */
+const HAS_ORIGIN_SQL = 'merchant_pubkey IS NOT NULL AND request_event IS NOT NULL';
+
+/** Empties every content and origin in a file leaving service (rotation, startup scrub). */
+const WIPE_SQL = `UPDATE codes SET content = '', merchant_pubkey = NULL, request_event = NULL
+  WHERE content != '' OR merchant_pubkey IS NOT NULL OR request_event IS NOT NULL`;
 
 const CODE_SPACE = 100_000_000; // eight digits: 00000000–99999999
 const MAX_MINT_ATTEMPTS = 20; // collision retries before giving up
@@ -124,29 +170,31 @@ export class CodeStore implements CodeStoreLike {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS codes (
         code         TEXT PRIMARY KEY,
-        uri          TEXT NOT NULL,
+        content      TEXT NOT NULL,
         created_at   INTEGER NOT NULL,
         expires_at   INTEGER NOT NULL,
-        retain_until INTEGER NOT NULL,
-        redeemed_at  INTEGER
+        retain_until INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_codes_created ON codes(created_at);
       DROP INDEX IF EXISTS idx_codes_retain;
       -- Served the old per-mint invoice scrub.
       DROP INDEX IF EXISTS idx_codes_live;
     `);
-    addRedeemedAtColumn(this.db);
+    upgradeSchema(this.db);
     this.insertStmt = this.db.prepare(
-      'INSERT OR IGNORE INTO codes (code, uri, created_at, expires_at, retain_until) VALUES (?, ?, ?, ?, ?)',
+      `INSERT OR IGNORE INTO codes (code, content, created_at, expires_at, retain_until, merchant_pubkey, request_event)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     this.selectStmt = this.db.prepare(
-      'SELECT uri, expires_at, retain_until, redeemed_at FROM codes WHERE code = ?',
+      'SELECT content, expires_at, retain_until, redeemed_at, merchant_pubkey, request_event FROM codes WHERE code = ?',
     );
     // Guarded on the row, not on the caller's earlier read: only an unused,
-    // unexpired row flips, so `changes` alone is the redeem verdict. `uri != ''`
-    // keeps a row from a wiped archive from ever being served as an empty invoice.
+    // unexpired row flips, so `changes` alone is the redeem verdict. A row from
+    // a wiped archive has neither content nor origin and is never served; a
+    // live row with empty content still has its origin, so it redeems.
     this.consumeStmt = this.db.prepare(
-      "UPDATE codes SET redeemed_at = ?1 WHERE code = ?2 AND redeemed_at IS NULL AND uri != '' AND expires_at > ?1",
+      `UPDATE codes SET redeemed_at = ?1 WHERE code = ?2 AND redeemed_at IS NULL
+         AND (content != '' OR ${HAS_ORIGIN_SQL}) AND expires_at > ?1`,
     );
     this.sweepStmt = this.db.prepare('DELETE FROM codes WHERE created_at <= ?');
     this.countStmt = this.db.prepare('SELECT COUNT(*) AS n FROM codes');
@@ -163,7 +211,7 @@ export class CodeStore implements CodeStoreLike {
    * no free code was found, or the anchor is already past validity (all "try
    * again").
    */
-  mint(uri: string, startedAt: number): MintResult | null {
+  mint(content: string, startedAt: number, origin: CodeOrigin): MintResult | null {
     this.purge();
     if (this.size >= this.maxEntries) return null;
 
@@ -175,7 +223,15 @@ export class CodeStore implements CodeStoreLike {
     for (let attempt = 0; attempt < MAX_MINT_ATTEMPTS; attempt++) {
       const code = randomInt(0, CODE_SPACE).toString().padStart(8, '0');
       // INSERT OR IGNORE → changes 0 means the code already exists (collision).
-      const result = this.insertStmt.run(code, uri, createdAt, expiresAt, retainUntil);
+      const result = this.insertStmt.run(
+        code,
+        content,
+        createdAt,
+        expiresAt,
+        retainUntil,
+        origin.merchantPubkey,
+        origin.requestEvent,
+      );
       if (Number(result.changes) === 1) return { code, expiresAt };
     }
     return null;
@@ -197,7 +253,11 @@ export class CodeStore implements CodeStoreLike {
     if (now >= row.retain_until) return { ok: false, reason: 'not-found' };
     if (row.redeemed_at !== null) return { ok: false, reason: 'redeemed' };
     if (Number(this.consumeStmt.run(now, code).changes) === 1) {
-      return { ok: true, uri: row.uri };
+      const origin =
+        row.merchant_pubkey !== null && row.request_event !== null
+          ? { merchantPubkey: row.merchant_pubkey, requestEvent: row.request_event }
+          : null;
+      return { ok: true, content: row.content, origin };
     }
     // Never redeemed, and the guarded consume refused it: it has lapsed.
     return { ok: false, reason: 'expired' };
@@ -239,14 +299,17 @@ export class CodeStore implements CodeStoreLike {
     if (!existsSync(path)) return;
     this.db.prepare('ATTACH DATABASE ? AS prev').run(path);
     try {
-      const columns = this.db.prepare('PRAGMA prev.table_info(codes)').all() as { name: string }[];
-      if (columns.length === 0) return;
-      // A file from before `redeemed_at` existed carries its codes as never redeemed.
-      const redeemedAt = columns.some((c) => c.name === 'redeemed_at') ? 'redeemed_at' : 'NULL';
+      const have = columnNames(this.db, 'prev');
+      if (have.size === 0) return;
+      // Read as the older file spells it: `uri` before the rename, and NULL
+      // for a late column it lacks (see LATE_COLUMNS).
+      const content = have.has('content') ? 'content' : 'uri';
+      const late = Object.keys(LATE_COLUMNS);
+      const select = late.map((c) => (have.has(c) ? c : 'NULL')).join(', ');
       this.db
         .prepare(
-          `INSERT OR IGNORE INTO main.codes (code, uri, created_at, expires_at, retain_until, redeemed_at)
-           SELECT code, uri, created_at, expires_at, retain_until, ${redeemedAt}
+          `INSERT OR IGNORE INTO main.codes (code, content, created_at, expires_at, retain_until, ${late.join(', ')})
+           SELECT code, ${content}, created_at, expires_at, retain_until, ${select}
            FROM prev.codes WHERE created_at > ?`,
         )
         .run(this.now() - CODE_REUSE_SECONDS);
@@ -256,12 +319,12 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Wipe every invoice, then close. For a file leaving service on day rotation:
-   * its live codes were carried into the new day's file, and the archived file
-   * must not keep their URIs.
+   * Wipe every invoice and origin, then close. For a file leaving service on day
+   * rotation: its live codes were carried into the new day's file, and the
+   * archived file must not keep their URIs or who asked for them.
    */
   retire(): void {
-    this.db.exec(WIPE_URIS_SQL);
+    this.db.exec(WIPE_SQL);
     this.db.close();
   }
 }
@@ -322,16 +385,19 @@ function dailyDbFiles(basePath: string): string[] {
 }
 
 /**
- * Wipe every invoice left in an archived daily file. Rotation and the startup
+ * Wipe every invoice and origin left in an archived daily file. Rotation and the startup
  * carry clean the file they leave, but a server down across two or more
  * midnights never touched the older ones, and nothing else ever would.
  */
 function scrubArchive(path: string): void {
   const db = new DatabaseSync(path);
   try {
-    if (db.prepare('PRAGMA table_info(codes)').all().length === 0) return;
+    if (columnNames(db, 'main').size === 0) return;
     db.exec('PRAGMA secure_delete = ON');
-    db.exec(WIPE_URIS_SQL);
+    // `WIPE_SQL` names the origin columns, so an archive from before they
+    // existed gains them (idempotent: a no-op once added).
+    upgradeSchema(db);
+    db.exec(WIPE_SQL);
   } finally {
     db.close();
   }
@@ -430,9 +496,9 @@ export class RotatingCodeStore implements CodeStoreLike {
     this.currentDay = day;
   }
 
-  mint(uri: string, startedAt: number): MintResult | null {
+  mint(content: string, startedAt: number, origin: CodeOrigin): MintResult | null {
     this.rotateIfNeeded();
-    return this.current.mint(uri, startedAt);
+    return this.current.mint(content, startedAt, origin);
   }
 
   redeem(code: string): RedeemResult {

@@ -10,24 +10,13 @@
  * are lost - the price of keeping plaintext payment data off this machine.
  */
 import { randomUUID } from 'node:crypto';
-import {
-  AUDIT_BATCH_MAX,
-  redactPayload,
-  type AuditBatch,
-  type AuditRecord,
-} from './audit.ts';
-import { validUntilOf } from './protocol.ts';
+import { AUDIT_BATCH_MAX, type AuditBatch, type AuditRecord } from './audit.ts';
 import { nowSeconds } from './time.ts';
 import { errorMessage, logger } from './logger.ts';
 
-/**
- * What a broker call site knows; id, time and expiry are filled in here. A
- * `refusedPayload` is hashed here too and never leaves this process as text.
- */
+/** What a broker call site knows; id and time are filled in here. */
 export type AuditEntry = Pick<AuditRecord, 'event' | 'pubkey' | 'requestEvent'> &
-  Partial<Pick<AuditRecord, 'code' | 'uri' | 'detail' | 'delivered'>> & {
-    refusedPayload?: string;
-  };
+  Partial<Pick<AuditRecord, 'code' | 'content' | 'reason' | 'delivered'>>;
 
 export interface AuditSink {
   record(entry: AuditEntry): void;
@@ -88,19 +77,14 @@ export class HttpAuditSink implements AuditSink {
   }
 
   record(entry: AuditEntry): void {
-    const { refusedPayload, ...fields } = entry;
     this.queue.push({
       id: randomUUID(),
       ts: this.now(),
       code: null,
-      uri: null,
-      detail: null,
+      content: null,
+      reason: null,
       delivered: null,
-      ...fields,
-      validUntil: fields.uri ? validUntilOf(fields.uri) : null,
-      ...(refusedPayload === undefined
-        ? { payloadHmac: null, payloadLength: null }
-        : redactPayload(refusedPayload, this.options.token)),
+      ...entry,
     });
     this.trimToCap();
     this.kick();

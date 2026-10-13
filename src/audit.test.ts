@@ -1,9 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
-import { AUDIT_BATCH_MAX, parseAuditBatch, redactPayload, type AuditRecord } from './audit.ts';
+import { AUDIT_BATCH_MAX, parseAuditBatch, type AuditRecord } from './audit.ts';
 import { auditRecord } from './audit.fixture.ts';
-import { MAX_STORED_LENGTH } from './protocol.ts';
+import { MAX_CONTENT_LENGTH } from './protocol.ts';
 
 test('a well-formed batch parses to its records', () => {
   const records = [auditRecord(), auditRecord({ event: 'blacklisted', delivered: null })];
@@ -11,7 +10,7 @@ test('a well-formed batch parses to its records', () => {
 });
 
 test('anything off-contract fails the whole batch', () => {
-  const { uri: _uri, ...missing } = auditRecord();
+  const { content: _content, ...missing } = auditRecord();
   for (const bad of [
     null,
     [],
@@ -22,7 +21,7 @@ test('anything off-contract fails the whole batch', () => {
     { records: [auditRecord({ event: 'drop_table' as AuditRecord['event'] })] },
     { records: [auditRecord({ pubkey: 'A'.repeat(64) })] },
     { records: [auditRecord({ code: '1234' })] },
-    { records: [auditRecord({ uri: 'x'.repeat(MAX_STORED_LENGTH + 1) })] },
+    { records: [auditRecord({ content: 'x'.repeat(MAX_CONTENT_LENGTH + 1) })] },
     { records: [auditRecord({ ts: -1 })] },
     { records: [auditRecord({ delivered: 'yes' as unknown as boolean })] },
     { records: [auditRecord(), 'not a record'] },
@@ -31,13 +30,14 @@ test('anything off-contract fails the whole batch', () => {
   }
 });
 
-test('a refused payload is reduced to a keyed hash and its length', () => {
-  const payload = 'defito://base/0xabc&amount=USDT:5';
-  const key = 'k'.repeat(32);
-  assert.deepEqual(redactPayload(payload, key), {
-    payloadHmac: createHmac('sha256', key).update(payload).digest('hex'),
-    payloadLength: payload.length,
-  });
-  // Without the key, the same payload hashes to something else entirely.
-  assert.notEqual(redactPayload(payload, 'x'.repeat(32)).payloadHmac, redactPayload(payload, key).payloadHmac);
+test('a batch in the pre-content shape is mapped, not rejected, so a deploy loses nothing', () => {
+  const { content, reason, ...rest } = auditRecord({ event: 'redeem_refused', reason: 'expired', content: null });
+  const legacy = { ...rest, uri: content, detail: reason, validUntil: null, payloadHmac: null, payloadLength: null };
+  const refused = { ...rest, event: 'invalid_request', uri: null, detail: 'malformed', validUntil: null, payloadHmac: 'b'.repeat(64), payloadLength: 42 };
+  assert.deepEqual(parseAuditBatch({ records: [legacy, refused] }), [
+    { ...rest, content: null, reason: 'expired' },
+    { ...rest, event: 'invalid_request', content: null, reason: 'malformed' },
+  ]);
+  // Still validated after mapping: a legacy record with a bad field fails the batch.
+  assert.equal(parseAuditBatch({ records: [{ ...legacy, pubkey: 'nope' }] }), null);
 });

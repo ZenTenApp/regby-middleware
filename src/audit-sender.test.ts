@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HttpAuditSink, type AuditEntry } from './audit-sender.ts';
-import { parseAuditBatch, redactPayload, type AuditRecord } from './audit.ts';
+import { parseAuditBatch, type AuditRecord } from './audit.ts';
 
 const URL_ = new URL('https://audit.example/events');
 const TOKEN = 't'.repeat(32);
@@ -36,17 +36,17 @@ function sink(f: typeof fetch, queueMax = 100): HttpAuditSink {
   return new HttpAuditSink({ url: URL_, token: TOKEN, queueMax, fetch: f, now: () => 1000 });
 }
 
-test('records ship with the bearer token, defaults filled and expiry read from the invoice', async () => {
+test('records ship with the bearer token and defaults filled', async () => {
   const { fetch, sent } = fakeFetch([204]);
   const s = sink(fetch);
-  s.record(entry({ uri: INVOICE, delivered: true }));
+  s.record(entry({ content: INVOICE, delivered: true }));
   await s.flush();
   assert.equal(sent.length, 1);
   assert.equal(sent[0]?.auth, `Bearer ${TOKEN}`);
   const [record] = sent[0]?.records ?? [];
   assert.equal(record?.ts, 1000);
-  assert.equal(record?.validUntil, 1795219200);
-  assert.equal(record?.detail, null);
+  assert.equal(record?.content, INVOICE);
+  assert.equal(record?.reason, null);
   assert.equal(s.pending, 0);
   await s.close();
 });
@@ -63,21 +63,6 @@ test('sink down or 5xx: the batch stays queued, in order, for the retry', async 
   await s.flush();
   assert.equal(s.pending, 0);
   assert.deepEqual(sent[0]?.records.map((r) => r.code), ['00000001', '00000002']);
-  await s.close();
-});
-
-test('a refused payload ships as its keyed hash, never as text', async () => {
-  const { fetch, sent } = fakeFetch([204]);
-  const s = sink(fetch);
-  const secret = 'defito://base/0xsecret&amount=USDT:9';
-  s.record(entry({ event: 'invalid_request', code: null, refusedPayload: secret }));
-  await s.flush();
-  const [record] = sent[0]?.records ?? [];
-  assert.deepEqual(
-    { payloadHmac: record?.payloadHmac, payloadLength: record?.payloadLength },
-    redactPayload(secret, TOKEN),
-  );
-  assert.ok(!JSON.stringify(sent).includes('0xsecret'));
   await s.close();
 });
 
