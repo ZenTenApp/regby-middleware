@@ -11,11 +11,8 @@ export function auditRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
     pubkey: HEX,
     requestEvent: HEX,
     code: '12345678',
-    uri: 'defito://base/0xabc',
-    validUntil: 1_700_000_600,
-    payloadHmac: null,
-    payloadLength: null,
-    detail: null,
+    content: 'defito://base/0xabc',
+    reason: null,
     delivered: true,
     ...overrides,
   };

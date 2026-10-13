@@ -31,25 +31,19 @@ const COLUMNS: readonly Column[] = [
   { name: 'ts', type: 'bigint', required: true, value: (r) => r.ts,
     comment: 'Broker time (unix seconds) when the request was answered. to_timestamp(ts) for a date.' },
   { name: 'event', type: 'text', required: true, value: (r) => r.event,
-    comment: 'code_issued | regby_busy | redeem | redeem_refused | invalid_request | blacklisted. See docs/audit-events.md.' },
+    comment: 'code_issued | regby_busy | redeem | redeem_refused | blacklisted | merchant_notified (older history may also hold invalid_request). See docs/audit-events.md.' },
   { name: 'pubkey', type: 'text', required: true, value: (r) => r.pubkey,
-    comment: 'Full hex pubkey of the sender: the merchant for code_issued, regby_busy, invalid_request, blacklisted/malicious; the customer for redeem, redeem_refused, blacklisted/guessing.' },
+    comment: 'Full hex pubkey: the merchant for code_issued, regby_busy, merchant_notified; the customer for redeem, redeem_refused, blacklisted/guessing.' },
   { name: 'request_event', type: 'text', required: true, value: (r) => r.requestEvent,
     comment: 'Id of the inbound Nostr event this record answers (the merchant or customer request).' },
   { name: 'code', type: 'text', required: false, value: (r) => r.code,
     comment: 'The 8-digit code: issued (code_issued) or presented by the customer (redeem, redeem_refused, blacklisted/guessing). Null otherwise.' },
-  { name: 'uri', type: 'text', required: false, value: (r) => r.uri,
-    comment: 'Full defito:// invoice, only for served requests: code_issued, regby_busy, redeem. Never for a refused payload.' },
-  { name: 'valid_until', type: 'bigint', required: false, value: (r) => r.validUntil,
-    comment: 'Earliest valid_until (unix seconds) across the invoice rails: when the merchant invoice lapses, not the 1-minute code expiry. Null when uri is null or carries none.' },
-  { name: 'payload_hmac', type: 'text', required: false, value: (r) => r.payloadHmac,
-    comment: 'Refused payloads only (invalid_request, blacklisted/malicious): HMAC-SHA256 hex of the decrypted text, keyed with REGBY_AUDIT_TOKEN. Matches a merchant-reported payload without storing it.' },
-  { name: 'payload_length', type: 'integer', required: false, value: (r) => r.payloadLength,
-    comment: 'Refused payloads only: length of the decrypted text in characters.' },
-  { name: 'detail', type: 'text', required: false, value: (r) => r.detail,
-    comment: 'Reason. redeem_refused: expired | redeemed | not-found. invalid_request: malformed. blacklisted: malicious | guessing. Null for the rest.' },
+  { name: 'content', type: 'text', required: false, value: (r) => r.content,
+    comment: 'Full content as sent (any text, empty included), only for served requests: code_issued, regby_busy, redeem.' },
+  { name: 'reason', type: 'text', required: false, value: (r) => r.reason,
+    comment: 'Why the request was refused. redeem_refused: expired | redeemed | not-found. blacklisted: guessing (older history: malicious). invalid_request (older history): malformed. Null for the rest.' },
   { name: 'delivered', type: 'boolean', required: false, value: (r) => r.delivered,
-    comment: 'Did the reply reach at least one relay. false on redeem means the code was used up but the customer never got the invoice. Null when no reply was sent (blacklisted/guessing).' },
+    comment: 'Did the reply reach at least one relay. false on redeem means the code was used up but the customer never got the content. Null when no reply was sent (blacklisted/guessing).' },
 ];
 
 const COLUMN_NAMES = COLUMNS.map((c) => c.name).join(', ');
@@ -58,7 +52,37 @@ const RECEIVED_AT_COMMENT =
   'Sink time (unix seconds) when the record was stored. Far after ts means the sink or database was down and the broker retried.';
 
 const TABLE_COMMENT =
-  'ReGBY audit history: one row per request the broker answered (or a code guesser it blacklisted). Full reference: docs/audit-events.md.';
+  'ReGBY audit history: one row per request the broker answered (or a code guesser it blacklisted), plus one per merchant redeem notice. Full reference: docs/audit-events.md.';
+
+/**
+ * Columns an older table spells differently, as [old, new]: `uri` held an
+ * invoice before content became opaque, `detail` was the refusal reason.
+ */
+const RENAMED_COLUMNS: readonly (readonly [string, string])[] = [
+  ['uri', 'content'],
+  ['detail', 'reason'],
+];
+
+/** Columns an older table has that nothing writes any more. */
+const DROPPED_COLUMNS: readonly string[] = ['valid_until', 'payload_hmac', 'payload_length'];
+
+const hasColumnSql = (name: string): string =>
+  `EXISTS (SELECT 1 FROM information_schema.columns
+           WHERE table_schema = current_schema() AND table_name = 'events' AND column_name = '${name}')`;
+
+/**
+ * Rename a column only while the table still has its old name: safe to run on
+ * every start. A table holding BOTH names was edited by hand; renaming would
+ * fail and silently picking one could lose the other's data, so stop with a
+ * message that says which.
+ */
+const renameColumnSql = (from: string, to: string): string => `DO $$ BEGIN
+    IF ${hasColumnSql(from)} AND ${hasColumnSql(to)} THEN
+      RAISE EXCEPTION 'events has both % and %: merge them by hand, then drop %', '${from}', '${to}', '${from}';
+    ELSIF ${hasColumnSql(from)} THEN
+      ALTER TABLE events RENAME COLUMN ${from} TO ${to};
+    END IF;
+  END $$;`;
 
 const quote = (text: string): string => `'${text.replaceAll("'", "''")}'`;
 
@@ -68,6 +92,8 @@ const CREATE_SQL = `
     received_at bigint NOT NULL,
     PRIMARY KEY (id)
   );
+  ${RENAMED_COLUMNS.map(([from, to]) => renameColumnSql(from, to)).join('\n  ')}
+  ALTER TABLE events ${DROPPED_COLUMNS.map((c) => `DROP COLUMN IF EXISTS ${c}`).join(', ')};
   CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
   CREATE INDEX IF NOT EXISTS idx_events_code ON events(code);
   CREATE INDEX IF NOT EXISTS idx_events_pubkey ON events(pubkey);

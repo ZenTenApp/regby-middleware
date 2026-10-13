@@ -51,11 +51,16 @@ export interface ReGBYTransport {
   /** Subscribe to inbound regby events addressed to the middleman. */
   subscribe(onEvent: (event: Event) => void): { close: () => void };
   /**
-   * Encrypt + sign + publish a raw-content reply of `intent` to a target.
-   * Resolves true when at least one relay accepted it; relay failures resolve
-   * false rather than reject.
+   * Encrypt + sign + publish a raw-content reply of `intent` to a target, with
+   * `extraTags` appended in plaintext. Resolves true when at least one relay
+   * accepted it; relay failures resolve false rather than reject.
    */
-  reply(target: ReplyTarget, intent: OutboundIntent, content: string): Promise<boolean>;
+  reply(
+    target: ReplyTarget,
+    intent: OutboundIntent,
+    content: string,
+    extraTags?: readonly string[][],
+  ): Promise<boolean>;
   /** Decrypt an inbound event's content with the sender's conversation key. */
   decrypt(senderPubkey: string, content: string): string;
   /** Publish NIP-09 deletions for our reply events whose expiry has passed. */
@@ -309,7 +314,7 @@ export function createTransport(
       return nip04.decrypt(secretKey, senderPubkey, content);
     },
 
-    async reply(target, intent, content) {
+    async reply(target, intent, content, extraTags = []) {
       // Raw outbound content before encryption (a code/URI value or an error
       // reason - same intent either way). Debug only.
       logger.debug('Outbound plaintext', { intent, to: target.recipientPubkey.slice(0, 12), content });
@@ -326,6 +331,7 @@ export function createTransport(
             [INTENT_TAG, intent],
             ['expiration', String(expiresAt)],
             CLIENT_TAG,
+            ...extraTags,
           ],
           content: ciphertext,
         },

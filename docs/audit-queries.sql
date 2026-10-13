@@ -12,22 +12,22 @@ ORDER BY a.attnum;
 
 
 -- Latest activity, readable times
-SELECT to_timestamp(ts) AS at, event, detail, code, delivered,
-       left(pubkey, 12) AS sender, valid_until, uri
+SELECT to_timestamp(ts) AS at, event, reason, code, delivered,
+       left(pubkey, 12) AS sender, content
 FROM events
 ORDER BY ts DESC
 LIMIT 100;
 
 
 -- Everything that happened to one code
-SELECT to_timestamp(ts) AS at, event, detail, delivered, left(pubkey, 12) AS sender, uri
+SELECT to_timestamp(ts) AS at, event, reason, delivered, left(pubkey, 12) AS sender, content
 FROM events
 WHERE code = '48213907'  -- edit: the code
 ORDER BY ts;
 
 
 -- One merchant's or customer's activity
-SELECT to_timestamp(ts) AS at, event, detail, code, delivered
+SELECT to_timestamp(ts) AS at, event, reason, code, delivered
 FROM events
 WHERE pubkey = '0000000000000000000000000000000000000000000000000000000000000000'  -- edit: full hex pubkey
 ORDER BY ts DESC
@@ -35,42 +35,33 @@ LIMIT 100;
 
 
 -- Codes used up but never delivered to the customer (see "delivered" in docs/audit-events.md)
-SELECT to_timestamp(ts) AS at, code, left(pubkey, 12) AS customer, uri
+SELECT to_timestamp(ts) AS at, code, left(pubkey, 12) AS customer, content
 FROM events
 WHERE event = 'redeem' AND delivered = false
 ORDER BY ts DESC;
 
 
 -- Every reply that reached no relay, by event
-SELECT event, detail, count(*) AS undelivered, to_timestamp(max(ts)) AS latest
+SELECT event, reason, count(*) AS undelivered, to_timestamp(max(ts)) AS latest
 FROM events
 WHERE delivered = false
-GROUP BY event, detail
+GROUP BY event, reason
 ORDER BY undelivered DESC;
 
 
 -- Daily totals per event and reason
-SELECT date_trunc('day', to_timestamp(ts)) AS day, event, detail, count(*) AS n
+SELECT date_trunc('day', to_timestamp(ts)) AS day, event, reason, count(*) AS n
 FROM events
 GROUP BY 1, 2, 3
 ORDER BY 1 DESC, 4 DESC;
 
 
--- Refused requests and blacklistings, newest first
-SELECT to_timestamp(ts) AS at, event, detail, code, payload_length,
-       left(pubkey, 12) AS sender, payload_hmac
+-- Refused redeems and blacklisted guessers, newest first
+SELECT to_timestamp(ts) AS at, event, reason, code, left(pubkey, 12) AS sender
 FROM events
-WHERE event IN ('redeem_refused', 'invalid_request', 'blacklisted')
+WHERE event IN ('redeem_refused', 'blacklisted')
 ORDER BY ts DESC
 LIMIT 100;
-
-
--- Match a payload a merchant reported. Compute the hex on a machine that has
--- the token, never paste the token here:
---   printf '%s' 'exact text' | openssl dgst -sha256 -hmac "$REGBY_AUDIT_TOKEN" -r | cut -d' ' -f1
-SELECT to_timestamp(ts) AS at, event, detail, payload_length, delivered, left(pubkey, 12) AS sender
-FROM events
-WHERE payload_hmac = '0000000000000000000000000000000000000000000000000000000000000000';  -- edit: hex from above
 
 
 -- How long records waited before reaching the database (last 24 h).

@@ -5,19 +5,15 @@
  * broker keeps none of it.
  *
  * One record per request the broker ANSWERED (or deliberately left unanswered
- * after doing work, like a guesser it blacklisted). Not recorded: events
+ * after doing work, like a guesser it blacklisted), plus one per merchant
+ * redeem notice it sent. Not recorded: events
  * dropped before any work (blacklisted sender, rate limited, undecryptable,
  * unusable content) - attacker-controlled volume with nothing to reconstruct.
  *
- * A full invoice travels only for a request that was SERVED (code_issued,
- * regby_busy, redeem). A refused payload is never sent as text: it may be a
- * near-miss invoice with real payment data in it, or arbitrary attacker
- * content, so the record carries its length and an HMAC keyed with the audit
- * token. Whoever holds the token can match a merchant's report against it; a
- * leaked copy of the history alone can't confirm a guessed invoice.
+ * The full content travels for a SERVED request (code_issued, regby_busy,
+ * redeem). Content is opaque, so nothing here reads or redacts it.
  */
-import { createHmac } from 'node:crypto';
-import { MAX_STORED_LENGTH, REGBY_CODE_RE } from './protocol.ts';
+import { MAX_CONTENT_LENGTH, REGBY_CODE_RE } from './protocol.ts';
 import { required } from './env.ts';
 
 export const AUDIT_EVENTS = [
@@ -25,32 +21,39 @@ export const AUDIT_EVENTS = [
   'regby_busy',
   'redeem',
   'redeem_refused',
-  'invalid_request',
   'blacklisted',
+  // Not a request: the notice sent to the merchant after a redeem. `pubkey` and
+  // `requestEvent` are the merchant's and their original request's.
+  'merchant_notified',
 ] as const;
 
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
+
+/**
+ * Events only a broker from before content became opaque sends. Accepted (see
+ * `fromLegacyShape`) so records in flight across that deploy are not lost; the
+ * current broker never emits them.
+ */
+const LEGACY_EVENTS = ['invalid_request'] as const;
+
+/** What the sink stores: today's events, plus the legacy ones still in history. */
+export type StoredEvent = AuditEvent | (typeof LEGACY_EVENTS)[number];
 
 export interface AuditRecord {
   /** Random UUID; the sink ignores a repeat, so a retried batch can't double rows. */
   id: string;
   /** Broker clock, unix seconds. */
   ts: number;
-  event: AuditEvent;
+  event: StoredEvent;
   /** Full hex pubkey of the sender. */
   pubkey: string;
   /** Id of the inbound Nostr event this record answers. */
   requestEvent: string;
   code: string | null;
-  /** Full invoice; only on a served request (see header). */
-  uri: string | null;
-  /** Earliest `valid_until` across the invoice's rails. */
-  validUntil: number | null;
-  /** Refused payloads: keyed hash and length in place of the text. */
-  payloadHmac: string | null;
-  payloadLength: number | null;
-  /** Refusal reason, e.g. `malformed`, `guessing`, `expired`. */
-  detail: string | null;
+  /** Full content, opaque; only on a served request (see header). */
+  content: string | null;
+  /** Why a request was refused: `expired`, `redeemed`, `not-found`, `guessing`. */
+  reason: string | null;
   /** Whether the reply reached a relay; null when none was sent. */
   delivered: boolean | null;
 }
@@ -74,20 +77,9 @@ export function loadAuditToken(): string {
   return token;
 }
 
-/** Keyed hash and length of a refused payload, in place of its text. */
-export function redactPayload(
-  plaintext: string,
-  key: string,
-): Pick<AuditRecord, 'payloadHmac' | 'payloadLength'> {
-  return {
-    payloadHmac: createHmac('sha256', key).update(plaintext).digest('hex'),
-    payloadLength: plaintext.length,
-  };
-}
-
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const DETAIL_MAX = 64;
+const REASON_MAX = 64;
 
 type Check = (value: unknown) => boolean;
 
@@ -100,19 +92,31 @@ const orNull = (check: Check): Check => (v) => v === null || check(v);
 const RECORD_FIELDS: Record<keyof AuditRecord, Check> = {
   id: matches(UUID_RE),
   ts: isUint,
-  event: (v) => typeof v === 'string' && (AUDIT_EVENTS as readonly string[]).includes(v),
+  event: (v) => typeof v === 'string' && ([...AUDIT_EVENTS, ...LEGACY_EVENTS] as readonly string[]).includes(v),
   pubkey: matches(HEX64_RE),
   requestEvent: matches(HEX64_RE),
   code: orNull(matches(REGBY_CODE_RE)),
-  uri: orNull(shortString(MAX_STORED_LENGTH)),
-  validUntil: orNull(isUint),
-  payloadHmac: orNull(matches(HEX64_RE)),
-  payloadLength: orNull(isUint),
-  detail: orNull(shortString(DETAIL_MAX)),
+  content: orNull(shortString(MAX_CONTENT_LENGTH)),
+  reason: orNull(shortString(REASON_MAX)),
   delivered: orNull((v) => typeof v === 'boolean'),
 };
 
 const FIELD_NAMES = Object.keys(RECORD_FIELDS) as (keyof AuditRecord)[];
+
+/**
+ * A record in the shape the broker sent before content became opaque (`uri`,
+ * `detail`, plus three fields it no longer has), mapped to today's shape;
+ * anything else is returned as is. During a deploy the sink is replaced before
+ * the broker, so the old broker's last batches arrive here, and a 400 would
+ * drop them for good. Remove once no broker of that age can still be running.
+ */
+function fromLegacyShape(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || !('uri' in value)) return value;
+  const { uri, detail, validUntil, payloadHmac, payloadLength, ...rest } = value as Record<string, unknown>;
+  const dropped = [validUntil, payloadHmac, payloadLength];
+  if (!dropped.every((v) => v === null || typeof v === 'number' || typeof v === 'string')) return value;
+  return { ...rest, content: uri, reason: detail };
+}
 
 function isAuditRecord(value: unknown): value is AuditRecord {
   if (typeof value !== 'object' || value === null) return false;
@@ -128,5 +132,6 @@ export function parseAuditBatch(body: unknown): AuditRecord[] | null {
   if (!Array.isArray(records) || records.length === 0 || records.length > AUDIT_BATCH_MAX) {
     return null;
   }
-  return records.every(isAuditRecord) ? (records as AuditRecord[]) : null;
+  const current = records.map(fromLegacyShape);
+  return current.every(isAuditRecord) ? current : null;
 }

@@ -1,8 +1,7 @@
 /**
- * Per-pubkey temporary blacklist. A sender that submits a `request_regby_code` whose
- * decrypted payload is not a `defito://` invoice is deliberately abusing the
- * service (they hold the conversation key - this is not random noise), so we
- * block them for a fixed window. Memory is bounded: entries are pruned on
+ * Per-pubkey temporary blacklist. A sender who keeps redeeming codes that do
+ * not exist is guessing at the code space to harvest other people's content,
+ * so we block them for a fixed window. Memory is bounded: entries are pruned on
  * access and by the periodic sweep.
  */
 import { nowSeconds } from './time.ts';

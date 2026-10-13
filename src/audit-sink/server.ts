@@ -11,7 +11,7 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { AUDIT_BATCH_MAX, parseAuditBatch, type AuditRecord } from '../audit.ts';
-import { MAX_STORED_LENGTH } from '../protocol.ts';
+import { MAX_CONTENT_LENGTH } from '../protocol.ts';
 import { errorMessage, logger } from '../logger.ts';
 
 /** What the intake stores into; `AuditStore` is the production one. */
@@ -21,11 +21,11 @@ export interface AuditSink {
 }
 
 /**
- * A full batch of maximal records at worst-case encoding: a `uri` character
+ * A full batch of maximal records at worst-case encoding: a `content` character
  * can cost 6 bytes as JSON (`\u00XX`), plus a margin for the other fields. A
  * 413 is never retried, so this must never refuse a batch the broker can send.
  */
-const MAX_RECORD_BYTES = MAX_STORED_LENGTH * 6 + 1024;
+const MAX_RECORD_BYTES = MAX_CONTENT_LENGTH * 6 + 1024;
 const MAX_BODY_BYTES = AUDIT_BATCH_MAX * MAX_RECORD_BYTES;
 
 /** Compare digests, not raw strings: equal length always, so no timing leak. */
