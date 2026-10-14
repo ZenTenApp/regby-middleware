@@ -19,10 +19,10 @@
  * event, so a redeem can name the merchant to the customer and notify the
  * merchant on their own request thread.
  *
- * **No reuse for 24 h**: a row is DELETED only `CODE_REUSE_SECONDS` (24 h) after
+ * **No reuse for 48 h**: a row is DELETED only `CODE_REUSE_SECONDS` (48 h) after
  * its `created_at`, so the primary key keeps that number out of every mint until
  * then. Past the answer window the row still exists but redeem reports
- * `not-found`, exactly as if it were gone. The 24 h is a constant, not config:
+ * `not-found`, exactly as if it were gone. The 48 h is a constant, not config:
  * it is a guarantee to customers holding an old code, not a tuning knob.
  *
  * **Single-use**: the first successful redeem consumes the code - it stamps
@@ -33,7 +33,7 @@
  * either (within one process).
  *
  * **Content stays for debugging**: a row keeps its content and origin until it is
- * deleted with the row, 24 h after issue, so the live file shows what every
+ * deleted with the row, 48 h after issue, so the live file shows what every
  * recent code was for. Deleted rows are zeroed (`secure_delete`) and the sweep
  * checkpoints the WAL so their page images leave the `-wal` log too. Archived
  * daily files keep neither: rotation and startup wipe them (below).
@@ -127,11 +127,13 @@ function upgradeSchema(db: DatabaseSync): void {
   }
 }
 
+const DAY_SECONDS = 86_400;
+
 /**
  * A code number is never issued again within this long of its last issue, so a
  * stale code in a customer's hands can never open someone else's invoice.
  */
-export const CODE_REUSE_SECONDS = 86_400;
+export const CODE_REUSE_SECONDS = 2 * DAY_SECONDS;
 
 /** A row knows who asked for it: both origin columns are set (they are written together). */
 const HAS_ORIGIN_SQL = 'merchant_pubkey IS NOT NULL AND request_event IS NOT NULL';
@@ -206,8 +208,8 @@ export class CodeStore implements CodeStoreLike {
 
   /**
    * Mint a unique code for a URI, validity anchored to `startedAt`. Never a
-   * number issued in the last 24 h: those rows still hold the primary key.
-   * Returns null when the store is at capacity (codes issued in the last 24 h),
+   * number issued in the last 48 h: those rows still hold the primary key.
+   * Returns null when the store is at capacity (codes issued in the last 48 h),
    * no free code was found, or the anchor is already past validity (all "try
    * again").
    */
@@ -241,7 +243,7 @@ export class CodeStore implements CodeStoreLike {
    * Redeem a code. Valid → `ok`, and the code is consumed (single-use). Already
    * redeemed → `redeemed`, until retention lapses. Never redeemed and past
    * validity → `expired`, likewise. Unknown or past the answer window →
-   * `not-found` (the row itself stays until the 24 h reuse window ends).
+   * `not-found` (the row itself stays until the 48 h reuse window ends).
    */
   redeem(code: string): RedeemResult {
     const row = this.selectStmt.get(code) as CodeRow | undefined;
@@ -263,7 +265,7 @@ export class CodeStore implements CodeStoreLike {
     return { ok: false, reason: 'expired' };
   }
 
-  /** Drop rows, invoice included, past the 24 h reuse window. */
+  /** Drop rows, content included, past the 48 h reuse window. */
   private purge(): void {
     this.sweepStmt.run(this.now() - CODE_REUSE_SECONDS);
   }
@@ -288,7 +290,7 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Copy the rows issued in the last 24 h from another day's file, as they
+   * Copy the rows issued within the reuse window from another day's file, as they
    * stand (invoice, expiry, redeemed state). Run when a new day's file opens,
    * so midnight neither frees those numbers for reuse nor cuts short a code
    * still inside its minute. The source keeps its invoices until the caller
@@ -306,11 +308,15 @@ export class CodeStore implements CodeStoreLike {
       const content = have.has('content') ? 'content' : 'uri';
       const late = Object.keys(LATE_COLUMNS);
       const select = late.map((c) => (have.has(c) ? c : 'NULL')).join(', ');
+      // A code already here keeps its row, but a redeem recorded in ANY copy
+      // wins: carries run one file at a time and a later one can follow a
+      // failed rotation, so the result must not depend on which copy came first.
       this.db
         .prepare(
-          `INSERT OR IGNORE INTO main.codes (code, content, created_at, expires_at, retain_until, ${late.join(', ')})
+          `INSERT INTO main.codes (code, content, created_at, expires_at, retain_until, ${late.join(', ')})
            SELECT code, ${content}, created_at, expires_at, retain_until, ${select}
-           FROM prev.codes WHERE created_at > ?`,
+           FROM prev.codes WHERE created_at > ?
+           ON CONFLICT(code) DO UPDATE SET redeemed_at = COALESCE(main.codes.redeemed_at, excluded.redeemed_at)`,
         )
         .run(this.now() - CODE_REUSE_SECONDS);
     } finally {
@@ -409,13 +415,17 @@ function scrubArchive(path: string): void {
  * disk, never purged - a daily archive. The active store is the only one read
  * or written.
  *
- * **Midnight carries the last 24 h**: opening a day's file (on rotation, and on
- * startup) copies in the previous day's rows issued within the last 24 h. Without
- * it the new file starts empty, every number from before midnight is free to
- * mint again within minutes, and a code minted at 23:59:50 dies at midnight. The
- * 24 h window can never reach back past yesterday, so one file is enough. The
- * switch is checked lazily on every op, and the broker's 60 s sweep timer calls
- * `sweep()`, so rotation happens within ~60 s of midnight even with no traffic.
+ * **Midnight carries the reuse window**: opening a day's file (on rotation, and
+ * on startup) copies in the rows issued within `CODE_REUSE_SECONDS` from every
+ * earlier day file that window reaches. Without it the new file starts empty,
+ * every number from before midnight is free to mint again within minutes, and a
+ * code minted at 23:59:50 dies at midnight. Yesterday's file already carries the
+ * day before, but after downtime it may not exist, so every day file the window
+ * reaches is read; a code redeemed in any of them stays redeemed. A file in the
+ * window that cannot be read fails the open on purpose: skipping it would free
+ * its numbers for reuse. The switch is checked lazily on every op, and the
+ * broker's 60 s sweep timer calls `sweep()`, so rotation happens within ~60 s
+ * of midnight even with no traffic.
  */
 export class RotatingCodeStore implements CodeStoreLike {
   private current: CodeStore;
@@ -465,7 +475,11 @@ export class RotatingCodeStore implements CodeStoreLike {
       this.now,
     );
     try {
-      store.carryFrom(dailyDbPath(this.basePath, now - CODE_REUSE_SECONDS));
+      // Every day the window can reach, rounding up for a window that is not a whole number of days.
+      const carryDays = Math.ceil(CODE_REUSE_SECONDS / DAY_SECONDS);
+      for (let daysBack = 1; daysBack <= carryDays; daysBack++) {
+        store.carryFrom(dailyDbPath(this.basePath, now - daysBack * DAY_SECONDS));
+      }
     } catch (err) {
       store.close();
       throw err;
@@ -484,8 +498,8 @@ export class RotatingCodeStore implements CodeStoreLike {
       next = this.openCurrent();
     } catch (err) {
       // Stay on yesterday's file, which still holds every live code, and retry
-      // on the next op. Opening today's without the carry would free the last
-      // 24 h of numbers for reuse.
+      // on the next op. Opening today's without the carry would free every
+      // number still inside the reuse window.
       logger.error('Day rotation failed - staying on the previous file', {
         error: errorMessage(err),
       });

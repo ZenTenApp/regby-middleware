@@ -19,7 +19,7 @@ export interface Config {
   /** Code validity window (anchored to the request's created_at). */
   codeTtlSeconds: number;
   /** How long a lapsed code still answers `Code Expired` / `Code Already Redeemed`.
-   * The row itself is kept 24 h (`CODE_REUSE_SECONDS`) so its number is not reused. */
+   * The row itself is kept 48 h (`CODE_REUSE_SECONDS`) so its number is not reused. */
   codeRetainSeconds: number;
   /** Base SQLite path; a per-UTC-day file (`regby-YYYY-MM-DD.db`) is derived from it. */
   dbPath: string;
@@ -34,8 +34,8 @@ export interface Config {
   redeemRateMax: number;
   redeemRateWindowSeconds: number;
   /** Global (all-sender) cap on mints per window. Each mint holds a store row
-   * for 24 h, so without it fresh pubkeys could fill `storeMax` and leave every
-   * merchant on "Service Busy" for a day after the flood stops. */
+   * for the 48 h reuse window, so without it fresh pubkeys could fill `storeMax`
+   * and leave every merchant on "Service Busy" for two days after the flood stops. */
   mintRateMax: number;
   mintRateWindowSeconds: number;
   /** Not-found redeems from one sender within the window before it's blacklisted
@@ -136,7 +136,7 @@ export function loadConfig(): Config {
   if (clockSkewSeconds >= codeTtlSeconds) {
     throw new Error('REGBY_CLOCK_SKEW_SECONDS must be < REGBY_CODE_TTL_SECONDS');
   }
-  // Rows are deleted, and not carried across midnight, once the 24 h reuse
+  // Rows are deleted, and not carried across midnight, once the 48 h reuse
   // window ends. A stamp up to `skew` ahead of the server anchors the answer
   // window that much later, so it must still close inside the reuse window.
   if (codeRetainSeconds + clockSkewSeconds > CODE_REUSE_SECONDS) {
@@ -145,14 +145,14 @@ export function loadConfig(): Config {
     );
   }
 
-  // A full day at the mint ceiling must fit the store (see `Config.mintRateMax`).
+  // A full reuse window at the mint ceiling must fit the store (see `Config.mintRateMax`).
   const storeMax = intEnv('REGBY_STORE_MAX', 1_000_000);
   const mintRateMax = intEnv('REGBY_MINT_RATE_MAX', 300);
   const mintRateWindowSeconds = intEnv('REGBY_MINT_RATE_WINDOW_SECONDS', 60);
-  const mintsPerDay = mintRateMax * Math.ceil(CODE_REUSE_SECONDS / mintRateWindowSeconds);
-  if (mintsPerDay > storeMax) {
+  const mintsPerWindow = mintRateMax * Math.ceil(CODE_REUSE_SECONDS / mintRateWindowSeconds);
+  if (mintsPerWindow > storeMax) {
     throw new Error(
-      `REGBY_MINT_RATE_MAX admits up to ${mintsPerDay} codes per 24 h, over REGBY_STORE_MAX (${storeMax})`,
+      `REGBY_MINT_RATE_MAX admits up to ${mintsPerWindow} codes per ${CODE_REUSE_SECONDS / 3600} h, over REGBY_STORE_MAX (${storeMax})`,
     );
   }
 

@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Event } from 'nostr-tools';
-import { npubEncode } from 'nostr-tools/nip19';
 import { ReGBYBroker } from './server.ts';
 import { CodeStore } from './store.ts';
 import type { Config } from './config.ts';
@@ -139,14 +138,14 @@ test('a redeem names the merchant to the customer and notifies the merchant', as
       target: { recipientPubkey: CUSTOMER, requestEventId: '3'.repeat(64) },
       intent: 'regby_content',
       content: INVOICE,
-      extraTags: [[FROM_TAG, npubEncode(MERCHANT)]],
+      extraTags: [[FROM_TAG, MERCHANT]],
     });
     // Event 5: the code back to the merchant, on their own request's thread.
     assert.deepEqual(toMerchant, {
       target: { recipientPubkey: MERCHANT, requestEventId: '1'.repeat(64) },
       intent: 'regby_redeemed',
       content: code,
-      extraTags: [[DELIVER_TO_TAG, npubEncode(CUSTOMER)]],
+      extraTags: [[DELIVER_TO_TAG, CUSTOMER]],
     });
     assert.deepEqual(
       audit.entries.map((e) => [e.event, e.pubkey, e.delivered]),
@@ -193,8 +192,8 @@ test('empty content runs the same five events, pairing the peers', async () => {
       transport.sent.map((r) => [r.intent, r.content, r.extraTags]),
       [
         ['regby_code', code, []],
-        ['regby_content', '', [[FROM_TAG, npubEncode(MERCHANT)]]],
-        ['regby_redeemed', code, [[DELIVER_TO_TAG, npubEncode(CUSTOMER)]]],
+        ['regby_content', '', [[FROM_TAG, MERCHANT]]],
+        ['regby_redeemed', code, [[DELIVER_TO_TAG, CUSTOMER]]],
       ],
     );
     assert.deepEqual(

@@ -98,9 +98,9 @@ export const REDEEMED_INTENT = 'regby_redeemed';
 export type OutboundIntent = (typeof REPLY_INTENT)[InboundIntent] | typeof REDEEMED_INTENT;
 
 /**
- * Plaintext tags naming the counterparty as an npub, so each side learns who
- * the server paired them with: `from` (the merchant) on the customer's
- * `regby_content`, `deliver_to` (the customer) on the merchant's
+ * Plaintext tags naming the counterparty by hex pubkey (as `p` does), so each
+ * side learns who the server paired them with: `from` (the merchant) on the
+ * customer's `regby_content`, `deliver_to` (the customer) on the merchant's
  * `regby_redeemed`. Unlike the content they are NOT encrypted: anyone reading
  * the relay sees which merchant and customer met. Accepted product trade-off.
  */

@@ -13,7 +13,6 @@
  * via the `e` tag.
  */
 import type { Event } from 'nostr-tools';
-import { npubEncode } from 'nostr-tools/nip19';
 import type { Config } from './config.ts';
 import { createTransport, type ReGBYTransport, type ReplyTarget } from './nostr.ts';
 import {
@@ -281,7 +280,7 @@ export class ReGBYBroker {
       REPLY_INTENT.request_regby_content,
       result.content,
       { event: 'redeem', code: message.code, content: result.content },
-      result.origin ? [[FROM_TAG, npubEncode(result.origin.merchantPubkey)]] : [],
+      result.origin ? [[FROM_TAG, result.origin.merchantPubkey]] : [],
     );
     if (!delivered) {
       logger.warn('Code consumed but its reply reached no relay', {
@@ -301,7 +300,7 @@ export class ReGBYBroker {
       requestEventId: origin.requestEvent,
     };
     const delivered = await this.answer(target, REDEEMED_INTENT, code, { event: 'merchant_notified', code }, [
-      [DELIVER_TO_TAG, npubEncode(customerPubkey)],
+      [DELIVER_TO_TAG, customerPubkey],
     ]);
     if (!delivered) {
       logger.warn('Merchant redeem notice reached no relay', {
