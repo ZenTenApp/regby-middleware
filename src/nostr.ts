@@ -18,7 +18,7 @@ import { type EventTemplate, finalizeEvent, type VerifiedEvent } from 'nostr-too
 import { nip04 } from 'nostr-tools';
 import type { Event, Filter } from 'nostr-tools';
 import WebSocket from 'ws';
-import { REGBY_KIND, INTENT_TAG, INBOUND_INTENTS, type OutboundIntent } from './protocol.ts';
+import { EMPTY_CONTENT, REGBY_KIND, INTENT_TAG, INBOUND_INTENTS, type OutboundIntent } from './protocol.ts';
 import { DeletionQueue } from './deletion-queue.ts';
 import { nowSeconds } from './time.ts';
 import { errorMessage, logger } from './logger.ts';
@@ -311,14 +311,16 @@ export function createTransport(
       // signature of. A decrypt that succeeds says the ciphertext was written
       // by someone holding the ECDH secret; it is the signature, not this, that
       // says who - see this module's note.
+      if (content === EMPTY_CONTENT) return EMPTY_CONTENT;
       return nip04.decrypt(secretKey, senderPubkey, content);
     },
 
     async reply(target, intent, content, extraTags = []) {
-      // Raw outbound content before encryption (a code/URI value or an error
-      // reason - same intent either way). Debug only.
+      // Raw outbound content before encryption (a code or the carried content).
+      // Debug only.
       logger.debug('Outbound plaintext', { intent, to: target.recipientPubkey.slice(0, 12), content });
-      const ciphertext = nip04.encrypt(secretKey, target.recipientPubkey, content);
+      const ciphertext =
+        content === EMPTY_CONTENT ? EMPTY_CONTENT : nip04.encrypt(secretKey, target.recipientPubkey, content);
       const now = nowSeconds();
       const expiresAt = now + eventExpirySeconds;
       const event = finalizeEvent(

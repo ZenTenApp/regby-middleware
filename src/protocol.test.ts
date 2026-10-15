@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { extractIntent, parseInbound, MAX_CONTENT_LENGTH, REPLY_REASON } from './protocol.ts';
+import { extractIntent, parseInbound, MAX_CONTENT_LENGTH, FAILURE_INTENT } from './protocol.ts';
 
 test('extractIntent reads a known i tag', () => {
   assert.equal(
@@ -112,21 +112,18 @@ test('real text is never read as binary', () => {
   }
 });
 
-// Cross-repo parity for failure-reply text: the same list, in the same order,
-// as `APP_REASONS` in the app's `__tests__/protocol-parity.test.ts`. A reason
-// this server sends that the app does not list renders there as a generic
-// error - which is how a renamed reason once nearly shipped unreadable. The app
-// may list more (`Invalid Request` is no longer sent), never fewer.
-const PARITY_REPLY_REASONS: readonly string[] = [
-  'Code Not Found',
-  'Code Expired',
-  'Code Already Redeemed',
-  'Service Busy, Try Again',
-  'Invalid Request',
+// Cross-repo parity for failure intents: the same list, in the same order, as
+// the app's failure intents in `__tests__/protocol-parity.test.ts`. A failure
+// intent this server sends that the app does not know never matches the app's
+// pending request, so the user waits out a timeout instead of seeing the error.
+const PARITY_FAILURE_INTENTS: readonly string[] = [
+  'regby_code_not_found',
+  'regby_code_expired',
+  'regby_code_already_redeemed',
+  'regby_code_locked',
+  'regby_code_busy',
 ];
 
-test('parity: every failure reason this server sends is on the app allowlist', () => {
-  for (const reason of Object.values(REPLY_REASON)) {
-    assert.ok(PARITY_REPLY_REASONS.includes(reason), reason);
-  }
+test('parity: every failure intent this server sends is known to the app', () => {
+  assert.deepEqual(Object.values(FAILURE_INTENT), PARITY_FAILURE_INTENTS);
 });

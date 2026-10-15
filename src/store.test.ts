@@ -79,7 +79,7 @@ test('redeem is single-use: a second redeem reports redeemed', () => {
   assert.equal(store.size, 1); // row kept for retention, so it reads redeemed, not a guess
 });
 
-test('a redeemed code reads redeemed for its whole retention, never expired', () => {
+test('a redeemed code reads redeemed inside its minute, then by age like any other', () => {
   const clock = fixedClock();
   const store = memStore(clock);
   const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
@@ -87,12 +87,11 @@ test('a redeemed code reads redeemed for its whole retention, never expired', ()
   assert.ok(store.redeem(minted.code).ok);
   clock.tick(TTL - 1);
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
-  clock.tick(1); // at the validity boundary: used, not lapsed
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
-  store.sweep(); // a sweep must not turn a used code into a lapsed one
-  clock.tick(RETAIN - TTL - 1);
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
-  clock.tick(1); // at the retention boundary: gone
+  clock.tick(1); // at the validity boundary: the later state wins
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
+  clock.tick(RETAIN - TTL); // at the answer-window boundary
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'locked' });
+  clock.tick(CODE_REUSE_SECONDS - RETAIN); // at the reuse boundary, before any sweep
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
 });
 
@@ -187,17 +186,20 @@ test('past validity but within retention reports expired and KEEPS the row', () 
   assert.equal(store.size, 1);
 });
 
-test('past the answer window: not-found, but the row holds its number for the reuse window', () => {
+test('past the answer window: locked while the row holds its number for the reuse window', () => {
   const clock = fixedClock();
   const store = memStore(clock);
   const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
   assert.ok(minted);
-  clock.tick(RETAIN); // at the answer-window boundary
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
+  clock.tick(RETAIN - 1);
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
+  clock.tick(1); // at the answer-window boundary
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'locked' });
   assert.equal(store.size, 1); // still reserved
   clock.tick(CODE_REUSE_SECONDS - RETAIN - 1);
   store.sweep();
   assert.equal(store.size, 1); // one second short of the reuse window
+  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'locked' });
   clock.tick(1);
   store.sweep();
   assert.equal(store.size, 0); // end of the reuse window: the number is free again
@@ -258,17 +260,21 @@ test('RotatingCodeStore switches files at the UTC day boundary', () => {
     const unused = store.mint('defito://unused', clock.now(), ORIGIN);
     assert.ok(minted && unused);
     assert.deepEqual(store.redeem(minted.code), { ok: true, content: 'defito://base/0xabc', origin: ORIGIN });
-    // 24 h later, on the next UTC day: past the answer window, but the 48 h
+    // 24 h later, on the next UTC day: past the answer window, but the 72 h
     // reuse window still holds both numbers, so both are carried over. The
     // redeem is the op that triggers the lazy rotation.
     clock.tick(86_400);
     const day2 = dailyDbPath(base, clock.now());
     assert.notEqual(day2, day1);
-    assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
+    assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'locked' });
     assert.equal(store.size, 2);
     // No sweep ran before the roll; retire() alone left the archive with no content.
     assert.deepEqual([...contentOnDisk(day1).values()], ['', '']);
-    // Exactly 48 h after issue, on the day after: the reuse window has closed,
+    // 48 h after issue, another day on: still inside the window, carried again.
+    clock.tick(86_400);
+    assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'locked' });
+    assert.equal(store.size, 2);
+    // Exactly 72 h after issue, on the day after: the reuse window has closed,
     // so the roll (triggered by a redeem, no sweep) carries nothing.
     clock.tick(86_400);
     assert.deepEqual(store.redeem('00000000'), { ok: false, reason: 'not-found' });
@@ -277,6 +283,7 @@ test('RotatingCodeStore switches files at the UTC day boundary', () => {
   } finally {
     rmDb(day1);
     rmDb(dailyDbPath(base, 1_700_000_000 + 86_400));
+    rmDb(dailyDbPath(base, 1_700_000_000 + 2 * 86_400));
     rmDb(dailyDbPath(base, clock.now()));
   }
 });
@@ -333,7 +340,7 @@ test('a restart on a new day carries yesterday\'s reservations, then frees them 
     clock.tick(2 * 3600); // server comes back two hours later, on the next day
     const second = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
     assert.equal(second.size, 1); // the number is still reserved in today's file
-    assert.deepEqual(second.redeem(minted.code), { ok: false, reason: 'not-found' });
+    assert.deepEqual(second.redeem(minted.code), { ok: false, reason: 'locked' });
     clock.tick(CODE_REUSE_SECONDS - 2 * 3600);
     second.sweep();
     assert.equal(second.size, 0);
@@ -569,7 +576,7 @@ test('after a day of downtime, a startup carries from the day before yesterday t
     assert.ok(minted);
     first.close();
     // Down for all of the next UTC day: no file for it. Back on the day after,
-    // still inside the 48 h window.
+    // still inside the 72 h window.
     clock.tick(86_400 + 3600);
     // Capacity 1: the carried reservation fills the store, so it is really held.
     const second = new RotatingCodeStore(TTL, RETAIN, 1, base, clock.now);

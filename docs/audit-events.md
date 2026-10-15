@@ -45,9 +45,9 @@ can say whether the reply reached a relay (`delivered`).
 | `event` | when | `pubkey` is | reply the app gets | `code` | `content` | `reason` | `delivered` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `code_issued` | content (any text) got a code | merchant | the code | issued code | yes | - | true / false |
-| `regby_busy` | no free code: `REGBY_STORE_MAX` codes were already issued in the last 48 h | merchant | `Service Busy, Try Again` | - | yes | - | true / false |
+| `regby_busy` | no free code: `REGBY_STORE_MAX` codes were already issued in the last 72 h | merchant | `regby_code_busy` | - | yes | - | true / false |
 | `redeem` | the code was valid and is now used up | customer | the content, tagged `from` = merchant | typed code | yes | - | true / false |
-| `redeem_refused` | the code could not be used | customer | `Code Expired` / `Code Already Redeemed` / `Code Not Found` | typed code | - | `expired` / `redeemed` / `not-found` | true / false |
+| `redeem_refused` | the code could not be used | customer | `regby_code_already_redeemed` / `regby_code_expired` / `regby_code_locked` / `regby_code_not_found` | typed code | - | `redeemed` / `expired` / `locked` / `not-found` | true / false |
 | `blacklisted` | a code guesser, blocked for `REGBY_BLACKLIST_SECONDS` (default 24 h) | customer | **no reply** | typed code | - | `guessing` | null |
 | `merchant_notified` | after a `redeem`, the merchant was told their code is used up (`regby_content_delivered`, tagged `to` = customer). Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_content_delivered`, content = the code | redeemed code | - | - | true / false |
 
@@ -81,17 +81,18 @@ code_issued ──▶ redeem                     (normal payment)
 redeem ──▶ merchant_notified                  (always follows a redeem of a code with a known merchant)
 ```
 
-To link them, query by `code`. Code numbers are not reused for 48 h, so within
-two days a code identifies a single request.
+To link them, query by `code`. Code numbers are not reused for 72 h, so within
+three days a code identifies a single request.
 
 ## reason values
 
-| `event` | `reason` | meaning | app shows |
+| `event` | `reason` | meaning | reply intent |
 | --- | --- | --- | --- |
-| `redeem_refused` | `expired` | The code existed but its 60 s (`REGBY_CODE_TTL_SECONDS`) had passed, and it was never used. | Code Expired |
-| `redeem_refused` | `redeemed` | The code was already used once. | Code Already Redeemed |
-| `redeem_refused` | `not-found` | No such code, or it was issued more than `REGBY_CODE_RETAIN_SECONDS` (1 h) ago. | Code Not Found |
-| `blacklisted` | `guessing` | One customer had more than `REGBY_REDEEM_FAIL_MAX` (default 10) `not-found` codes within `REGBY_REDEEM_RATE_WINDOW_SECONDS` (default 60 s). The earlier misses are on record as `redeem_refused` / `not-found`. No reply is sent, so the guesser can't tell a miss from a block. Blocked for 24 h. | nothing |
+| `redeem_refused` | `expired` | The code's 60 s (`REGBY_CODE_TTL_SECONDS`) had passed, used or not, and it is under `REGBY_CODE_RETAIN_SECONDS` (1 h) old. | `regby_code_expired` |
+| `redeem_refused` | `redeemed` | The code was already used, and is still inside its 60 s. | `regby_code_already_redeemed` |
+| `redeem_refused` | `locked` | The code was issued 1 h to 72 h ago; its number is held back from reuse. Counts as a guess. | `regby_code_locked` |
+| `redeem_refused` | `not-found` | No such code, or it was issued more than 72 h ago. Counts as a guess. | `regby_code_not_found` |
+| `blacklisted` | `guessing` | One customer had more than `REGBY_REDEEM_FAIL_MAX` (default 10) `not-found` or `locked` codes within `REGBY_REDEEM_RATE_WINDOW_SECONDS` (default 60 s). The earlier misses are on record as `redeem_refused` / `not-found` or `locked`. No reply is sent, so the guesser can't tell a miss from a block. Blocked for 24 h. | nothing |
 
 ## delivered
 
@@ -102,10 +103,11 @@ two days a code identifies a single request.
     expires unused.
   - `redeem`: **the code is used up but the customer never got the content**,
     because the broker uses the code up before it sends the reply. The customer's
-    retry gets `Code Already Redeemed`, and the merchant has to issue a new
+    retry gets `regby_code_already_redeemed` (or `regby_code_expired` after the
+    code's minute), and the merchant has to issue a new
     code. This is the row to look for when a customer says "it said already
     redeemed but I never paid".
-  - Refusals: the sender never saw the reason.
+  - Refusals: the sender never saw the failure.
 - `null`: no reply was sent (`blacklisted` / `guessing`).
 
 ## Times

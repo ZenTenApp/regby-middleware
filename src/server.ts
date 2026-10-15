@@ -1,17 +1,14 @@
 /**
  * ReGBY broker. Wires the transport, store, and rate limiter together and
  * dispatches inbound events:
- *   request_regby_code    → mint a code, reply `i:regby_code` (content = code,
- *                           or a reason string on failure)
+ *   request_regby_code    → mint a code, reply `i:regby_code` (content = code)
  *   request_regby_content → look up code, reply `i:regby_content` (content =
- *                           the stored content, single-use, or a reason
- *                           string on failure); a successful one also sends
- *                           the merchant `i:regby_content_delivered`
+ *                           the stored content, single-use); a successful one
+ *                           also sends the merchant `i:regby_content_delivered`
  *                           (content = the code)
  * Content is opaque: never judged here, only carried (see `protocol.ts`).
- * There is no `error` intent - a failure reuses the request's success intent and
- * puts a fixed `REPLY_REASON` in `content`. Every reply links to the request
- * via the `e` tag.
+ * A failure replies with its own `FAILURE_INTENT` and empty content. Every
+ * reply links to the request via the `e` tag.
  */
 import type { Event } from 'nostr-tools';
 import type { Config } from './config.ts';
@@ -28,12 +25,14 @@ import { BoundedMap } from './bounded-map.ts';
 import { nowSeconds } from './time.ts';
 import {
   CONTENT_DELIVERED_INTENT,
+  EMPTY_CONTENT,
   extractIntent,
   FROM_TAG,
   parseInbound,
+  FAILURE_INTENT,
   REPLY_INTENT,
-  REPLY_REASON,
   TO_TAG,
+  type FailureIntent,
   type InboundMessage,
   type OutboundIntent,
 } from './protocol.ts';
@@ -46,12 +45,22 @@ type AuditFields = Omit<AuditEntry, 'pubkey' | 'requestEvent'>;
 /** Remember processed event ids so a relay re-delivery can't double-mint. */
 const SEEN_MAX = 50_000;
 
-/** Reply content per redeem refusal (see `REPLY_REASON` for the app contract). */
-const REDEEM_FAILURE_REPLY: Record<RedeemFailureReason, string> = {
-  redeemed: REPLY_REASON.redeemed,
-  expired: REPLY_REASON.expired,
-  'not-found': REPLY_REASON.notFound,
+/** Reply intent per redeem refusal (see `FAILURE_INTENT` for the app contract). */
+const REDEEM_FAILURE_INTENT: Record<RedeemFailureReason, FailureIntent> = {
+  redeemed: FAILURE_INTENT.redeemed,
+  expired: FAILURE_INTENT.expired,
+  locked: FAILURE_INTENT.locked,
+  'not-found': FAILURE_INTENT.notFound,
 };
+
+/**
+ * Refusals that count as a guess toward the blacklist: a number no live code
+ * holds. `locked` counts too - a real customer does not type a code over an
+ * hour old, a guesser landing on a recently issued number does.
+ */
+const GUESS_REASONS: ReadonlySet<RedeemFailureReason> = new Set(['not-found', 'locked']);
+
+
 
 /** Collaborators a test can swap; production builds each from `Config`. */
 export interface BrokerDeps {
@@ -220,7 +229,7 @@ export class ReGBYBroker {
       });
       if (!minted) {
         logger.warn('Mint failed (store full / no free code)', { size: this.store.size });
-        await this.answer(target, REPLY_INTENT.request_regby_code, REPLY_REASON.busy, {
+        await this.answer(target, FAILURE_INTENT.busy, EMPTY_CONTENT, {
           event: 'regby_busy',
           content: message.content,
         });
@@ -249,10 +258,10 @@ export class ReGBYBroker {
 
     const result = this.store.redeem(message.code);
     if (!result.ok) {
-      // A not-found (as opposed to expired/redeemed) is a miss against the code space -
-      // i.e. a guess. Count strikes per sender and blacklist a persistent
-      // guesser; return no reply so the failure isn't an enumeration oracle.
-      if (result.reason === 'not-found' && !this.redeemFails.allow(target.recipientPubkey)) {
+      // A guess (see `GUESS_REASONS`) is a miss against the code space. Count
+      // strikes per sender and blacklist a persistent guesser; return no reply
+      // so the failure isn't an enumeration oracle.
+      if (GUESS_REASONS.has(result.reason) && !this.redeemFails.allow(target.recipientPubkey)) {
         this.blacklist.block(target.recipientPubkey);
         logger.warn('Blacklisted sender - repeated code guessing', {
           from,
@@ -264,12 +273,11 @@ export class ReGBYBroker {
         from,
         reason: result.reason,
       });
-      await this.answer(
-        target,
-        REPLY_INTENT.request_regby_content,
-        REDEEM_FAILURE_REPLY[result.reason],
-        { event: 'redeem_refused', code: message.code, reason: result.reason },
-      );
+      await this.answer(target, REDEEM_FAILURE_INTENT[result.reason], EMPTY_CONTENT, {
+        event: 'redeem_refused',
+        code: message.code,
+        reason: result.reason,
+      });
       return;
     }
     logger.info('Redeemed code', { from });

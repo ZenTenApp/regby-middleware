@@ -35,18 +35,25 @@ relays opens a kind 4 with - a NIP-44 payload here is not a message the other
 side reports as broken, it is one it never sees. Sender authenticity therefore
 comes from the event signature alone, never from a successful decrypt.
 
+**Empty content is never encrypted**, in either direction: a failure reply, a
+success carrying the merchant's empty content, or an empty request all travel
+as a raw `""`, and a receiver checks for `""` before it decrypts. Not yet
+verified: whether every relay and NIP-04 client accepts a kind 4 with empty
+content. Some clients may try to decrypt it and throw, and some relays may
+refuse it.
+
 - **Intent** rides the `['i', <intent>]` tag (single-letter → relay-indexable):
   `request_regby_code` / `regby_code` / `request_regby_content` / `regby_content`,
   plus `regby_content_delivered`, the server's notice to the merchant after a
   redeem.
-- **No `error` intent**: a failure reuses the request's success intent
-  (`regby_code` for a `request_regby_code`, `regby_content` for a
-  `request_regby_content`) and carries one of the fixed `REPLY_REASON`
-  strings in `content`. The client whitelist-sanitises any reason it shows -
-  the middleman is untrusted, so a free error-text channel was a hole into the
-  UI. Content is any text, so its shape no longer tells a value from an
-  error. The signal is the **`from` tag**: a successful `regby_content`
-  always carries it, a failure never does. (Codes minted before origins were
+- **Failures have their own intents** (`FAILURE_INTENT`):
+  `regby_code_already_redeemed`, `regby_code_expired`, `regby_code_locked`,
+  `regby_code_not_found` answer a `request_regby_content`, `regby_code_busy` a
+  `request_regby_code`. Their `content` is empty and they carry no `from` tag. There is no free error
+  text, so the untrusted middleman has no channel into the UI. Content is any
+  text, empty included, so the client reads the **intent** first: an empty
+  `regby_content` is a success with empty content, not a failure. A successful
+  `regby_content` also carries `from`. (Codes minted before origins were
   stored redeem without it; they last at most the 1-minute code life after
   the deploy.) A `regby_code` value is always eight digits.
 - **Correlation** is the `['e', <request-event-id>]` reply tag - the client
@@ -105,31 +112,38 @@ still dropped as noise.
 - **request_regby_content** → look up the code. Valid → reply `i:regby_content` with the content.
   **Single-use**: the first successful redeem consumes the code. A code
   expires after 1 min or its first use, whichever comes first. The live file
-  keeps every code's content, used or lapsed, until the row is deleted 48 h after
+  keeps every code's content, used or lapsed, until the row is deleted 72 h after
   issue, so recent codes can be debugged straight from the db; day rotation
   wipes every content left in the outgoing file. Consume happens before the reply is
   published, so a reply no relay accepted still burns the code (logged as a
-  warning); the merchant re-mints. While the row is **retained** (within 1 h of
-  the merchant's request): already redeemed → `i:regby_content` `Code Already Redeemed`
-  (inside its 1-min validity or past it, the row's `redeemed_at` says so);
-  lapsed and never redeemed → `Code Expired`. Never minted or past retention →
-  `Code Not Found` (reason in `content`, not a URI).
+  warning); the merchant re-mints. A refused code is in exactly **one state, by
+  age** from the merchant's request, each later state overriding the earlier
+  (so a used code reads `expired` once its minute is over):
+
+  | age | reply |
+  | --- | --- |
+  | under 1 min, already used | `i:regby_code_already_redeemed` |
+  | 1 min to 1 h (`REGBY_CODE_RETAIN_SECONDS`), used or not | `i:regby_code_expired` |
+  | 1 h to 72 h, number still held back | `i:regby_code_locked` |
+  | never issued, or past 72 h | `i:regby_code_not_found` |
+
+  Each with empty content.
 - **Persistence**: the code store is **SQLite** (`node:sqlite`, file derived from
   `REGBY_DB_PATH`), so codes survive a restart - a reboot no longer makes every
-  code `Code Not Found`. Each row carries `created_at` (wall-clock mint),
+  code not found. Each row carries `created_at` (wall-clock mint),
   `expires_at` (validity), `retain_until` (answer window,
-  `REGBY_CODE_RETAIN_SECONDS`, after which redeem says `Code Not Found`) and
+  `REGBY_CODE_RETAIN_SECONDS`, after which redeem says `regby_code_locked`) and
   `redeemed_at`.
-- **No code reuse for 48 h**: a row is deleted only 48 h after its
+- **No code reuse for 72 h**: a row is deleted only 72 h after its
   `created_at`, so its number cannot be issued again before then, even across
   midnight or a restart. A customer holding an old code can never open someone
-  else's invoice with it. Fixed, not configurable. Rows past 48 h are swept on
+  else's invoice with it. Fixed, not configurable. Rows past 72 h are swept on
   a 60s timer (also stale rate buckets + blacklist entries).
 - **Daily rotation**: a new SQLite file is opened per **UTC day**
   (nested `YYYY/MM/regby-YYYY-MM-DD.db` derived from `REGBY_DB_PATH`), switched at 00:00 UTC; old
   files are kept on disk as a daily archive. Only the current day's file is
   read or written, but opening it (at the roll, or on startup) copies in the
-  codes from the last 48 h out of every earlier day file that window reaches
+  codes from the last 72 h out of every earlier day file that window reaches
   (newest first, so a code's latest state wins), so midnight neither frees their
   numbers nor cuts short a code minted at 23:59. Archived files keep no
   invoices: the roll wipes the file it leaves, and startup wipes every older
@@ -137,7 +151,7 @@ still dropped as noise.
 - **Audit log**: one record per request the server answered (or a guesser it
   blacklisted), sent to a separate **audit sink** process that stores it in a
   remote Postgres; nothing of it is kept on disk. Events: `code_issued`, `regby_busy`, `redeem`,
-  `redeem_refused` (`reason` = `expired` / `redeemed` / `not-found`),
+  `redeem_refused` (`reason` = `redeemed` / `expired` / `locked` / `not-found`),
   `blacklisted` (`guessing`), `merchant_notified`.
   Each carries the server time, the **full** sender pubkey, the request event
   id, the code, and `delivered` (did the reply reach a relay). A **served**
@@ -175,20 +189,20 @@ still dropped as noise.
 ### Safeguards
 
 - Per-sender sliding-window rate limit (`REGBY_RATE_MAX` / window).
-- Global mint rate ceiling (`REGBY_MINT_RATE_MAX`), sized so a full 48 h of it
+- Global mint rate ceiling (`REGBY_MINT_RATE_MAX`), sized so a full 72 h of it
   fits `REGBY_STORE_MAX`: a flood from fresh pubkeys can't fill the store and
-  leave merchants on `Service Busy` for the 48 h its rows are held.
+  leave merchants on `regby_code_busy` for the 72 h its rows are held.
 - Global redeem rate ceiling (`REGBY_REDEEM_RATE_MAX`) plus per-sender
-  not-found strikes (`REGBY_REDEEM_FAIL_MAX` → blacklist): bounds code-space
+  not-found / locked strikes (`REGBY_REDEEM_FAIL_MAX` → blacklist): bounds code-space
   enumeration / URI harvesting even by an attacker rotating fresh pubkeys.
 - Code-TTL anchor (`created_at`) skew-clamped so expiry can't be gamed.
-- Store capacity cap (`REGBY_STORE_MAX`, codes issued in any 48 h) - mints past
-  it reply `i:regby_code` with `Service Busy, Try Again` (a reason, not a code).
+- Store capacity cap (`REGBY_STORE_MAX`, codes issued in any 72 h) - mints past
+  it reply `i:regby_code_busy` with empty content.
 - Processed event ids are remembered so a relay re-delivery can't double-mint.
 - Length cap (4096 characters) and a binary screen; no other content checks.
 - Decrypted content / live codes are logged only at `debug`.
 
-> **Trust note.** For 48 h after issue the server's live file holds the
+> **Trust note.** For 72 h after issue the server's live file holds the
 > plaintext content, so a compromised server could hand the customer different
 > content (for an invoice, a different recipient). The recipient must treat
 > every content as untrusted: the wallet still validates an invoice and the
@@ -295,7 +309,7 @@ psql "$REGBY_AUDIT_DATABASE_URL?sslmode=verify-full&sslrootcert=certs/db-ca.pem"
 | `src/protocol.ts`   | intents, tags, envelope checks (binary, size, code shape) |
 | `src/config.ts`     | env loading, key decode, pubkey derivation        |
 | `src/nostr.ts`      | relay pool, NIP-04 encrypt/decrypt, publish       |
-| `src/store.ts`      | SQLite code → content + origin store (1-min validity, single-use, 1-h answer window, 48-h row) + per-UTC-day file rotation |
+| `src/store.ts`      | SQLite code → content + origin store (1-min validity, single-use, 1-h answer window, 72-h row) + per-UTC-day file rotation |
 | `src/audit.ts`      | audit wire contract (record shape, validation)    |
 | `src/audit-sender.ts` | broker side: bounded queue, batched POST (HTTPS, or http to a local sink), backoff |
 | `src/audit-sink/`   | the audit service: HTTP intake, Postgres history, retention |

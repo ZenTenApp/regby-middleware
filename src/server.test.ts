@@ -106,10 +106,17 @@ const CONFIG: Config = {
 
 async function withBroker(
   fn: (transport: FakeTransport, audit: MemoryAudit) => Promise<void>,
+  clock?: () => number,
 ): Promise<void> {
   const transport = new FakeTransport();
   const audit = new MemoryAudit();
-  const store = new CodeStore(CONFIG.codeTtlSeconds, CONFIG.codeRetainSeconds, CONFIG.storeMax, ':memory:');
+  const store = new CodeStore(
+    CONFIG.codeTtlSeconds,
+    CONFIG.codeRetainSeconds,
+    CONFIG.storeMax,
+    ':memory:',
+    clock,
+  );
   const broker = new ReGBYBroker(CONFIG, { transport, store, auditSink: audit });
   broker.start();
   try {
@@ -178,7 +185,8 @@ test('a refused redeem notifies no one and tags no merchant', async () => {
     await transport.inbound('3', CUSTOMER, 'request_regby_content', code);
     await transport.inbound('5', CUSTOMER, 'request_regby_content', code); // already redeemed
     const refusal = transport.sent.at(-1);
-    assert.equal(refusal?.content, 'Code Already Redeemed');
+    assert.equal(refusal?.intent, 'regby_code_already_redeemed');
+    assert.equal(refusal?.content, '');
     assert.deepEqual(refusal?.extraTags, []);
     assert.equal(transport.sent.filter((r) => r.intent === 'regby_content_delivered').length, 1);
   });
@@ -201,4 +209,32 @@ test('empty content runs the same five events, pairing the peers', async () => {
       ['code_issued', 'redeem', 'merchant_notified'],
     );
   });
+});
+
+test('an unknown code is refused as not found, with empty content', async () => {
+  await withBroker(async (transport) => {
+    await transport.inbound('3', CUSTOMER, 'request_regby_content', '12345678');
+    assert.deepEqual(
+      transport.sent.map((r) => [r.intent, r.content, r.extraTags]),
+      [['regby_code_not_found', '', []]],
+    );
+  });
+});
+
+test('a locked code is refused with empty content and counts as a guess', async () => {
+  // The store's clock only: the merchant's `created_at` (real now) anchors the
+  // code, and moving the store past the answer window makes it locked.
+  let offset = 0;
+  const clock = (): number => Math.floor(Date.now() / 1000) + offset;
+  await withBroker(async (transport, audit) => {
+    const code = await mint(transport);
+    offset = CONFIG.codeRetainSeconds;
+    for (let i = 0; i <= CONFIG.redeemFailMax; i++) {
+      await transport.inbound(`l${i}`, CUSTOMER, 'request_regby_content', code);
+    }
+    const refusals = transport.sent.slice(1);
+    assert.equal(refusals.length, CONFIG.redeemFailMax);
+    for (const r of refusals) assert.deepEqual([r.intent, r.content, r.extraTags], ['regby_code_locked', '', []]);
+    assert.equal(audit.entries.at(-1)?.event, 'blacklisted');
+  }, clock);
 });

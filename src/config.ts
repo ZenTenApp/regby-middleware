@@ -18,8 +18,9 @@ export interface Config {
   relays: string[];
   /** Code validity window (anchored to the request's created_at). */
   codeTtlSeconds: number;
-  /** How long a lapsed code still answers `Code Expired` / `Code Already Redeemed`.
-   * The row itself is kept 48 h (`CODE_REUSE_SECONDS`) so its number is not reused. */
+  /** How long a lapsed code still answers `regby_code_expired`.
+   * Past it the row is kept, answering `regby_code_locked`, until 72 h
+   * (`CODE_REUSE_SECONDS`) so its number is not reused. */
   codeRetainSeconds: number;
   /** Base SQLite path; a per-UTC-day file (`regby-YYYY-MM-DD.db`) is derived from it. */
   dbPath: string;
@@ -34,12 +35,13 @@ export interface Config {
   redeemRateMax: number;
   redeemRateWindowSeconds: number;
   /** Global (all-sender) cap on mints per window. Each mint holds a store row
-   * for the 48 h reuse window, so without it fresh pubkeys could fill `storeMax`
-   * and leave every merchant on "Service Busy" for two days after the flood stops. */
+   * for the 72 h reuse window, so without it fresh pubkeys could fill `storeMax`
+   * and leave every merchant on `regby_code_busy` for three days after the flood stops. */
   mintRateMax: number;
   mintRateWindowSeconds: number;
-  /** Not-found redeems from one sender within the window before it's blacklisted
-   * as a code-guesser (expired redeems don't count - those are real lapsed codes). */
+  /** Not-found or locked redeems from one sender within the window before it's
+   * blacklisted as a code-guesser (expired / redeemed don't count - a real
+   * customer is late with a real code). */
   redeemFailMax: number;
   storeMax: number;
   /** How long a code guesser stays blacklisted (seconds). */
@@ -130,13 +132,13 @@ export function loadConfig(): Config {
   }
   // A stale stamp is clamped to `now - skew`, so a skew at or past the TTL
   // anchors the code at or before its own expiry: mint refuses it and the
-  // merchant is told "Service Busy" on every retry, since the next request is
+  // merchant is told `regby_code_busy` on every retry, since the next request is
   // just as stale.
   const clockSkewSeconds = intEnv('REGBY_CLOCK_SKEW_SECONDS', 30);
   if (clockSkewSeconds >= codeTtlSeconds) {
     throw new Error('REGBY_CLOCK_SKEW_SECONDS must be < REGBY_CODE_TTL_SECONDS');
   }
-  // Rows are deleted, and not carried across midnight, once the 48 h reuse
+  // Rows are deleted, and not carried across midnight, once the 72 h reuse
   // window ends. A stamp up to `skew` ahead of the server anchors the answer
   // window that much later, so it must still close inside the reuse window.
   if (codeRetainSeconds + clockSkewSeconds > CODE_REUSE_SECONDS) {
@@ -146,7 +148,7 @@ export function loadConfig(): Config {
   }
 
   // A full reuse window at the mint ceiling must fit the store (see `Config.mintRateMax`).
-  const storeMax = intEnv('REGBY_STORE_MAX', 1_000_000);
+  const storeMax = intEnv('REGBY_STORE_MAX', 1_500_000);
   const mintRateMax = intEnv('REGBY_MINT_RATE_MAX', 300);
   const mintRateWindowSeconds = intEnv('REGBY_MINT_RATE_WINDOW_SECONDS', 60);
   const mintsPerWindow = mintRateMax * Math.ceil(CODE_REUSE_SECONDS / mintRateWindowSeconds);

@@ -47,7 +47,9 @@ These did not exist when the middleware judged content.
 
 1. **Empty content.** A `request_regby_code` with `""` is valid: it pairs the
    peers through the `from` / `to` tags. The redeemed
-   `regby_content` carries an encrypted `""`. `sanitizeRedeemedUri` throws
+   `regby_content` carries a raw, unencrypted `""`: empty content is never
+   encrypted, in either direction, so the app must check for `""` before it
+   calls `nip04.decrypt`, and may send an empty request unencrypted too. `sanitizeRedeemedUri` throws
    `Empty payment request.` on it today; it must be treated as a successful
    pairing, not an error.
 2. **Content that is not a `defito://` invoice.** Any text now gets a code.
@@ -55,13 +57,16 @@ These did not exist when the middleware judged content.
    must screen it (check 4) before rendering anything.
 3. **Telling a value from an error.** The app used to tell a value from a
    failure reason by shape (eight digits or `defito://` = value, anything
-   else = reason). Content is now opaque, so a merchant can send text equal to
-   a reason. Use the **`from` tag** instead: a successful `regby_content`
-   always carries it, a failure (`Code Not Found`, `Code Expired`,
-   `Code Already Redeemed`) never does. On `regby_code`, a value is still
-   always eight digits, and `Service Busy, Try Again` is the only failure.
-4. **`Invalid Request` is no longer sent.** It can stay on the app's reason
-   allowlist for older middleware builds.
+   else = reason). Failures now have their own intents with empty content:
+   `regby_code_already_redeemed`, `regby_code_expired`, `regby_code_locked`,
+   `regby_code_not_found` answer a `request_regby_content`, and
+   `regby_code_busy` answers a `request_regby_code`. The app must match these
+   to its pending request by `e` (as it does `regby_code` / `regby_content`)
+   and show its own text for each. Content never decides it: a successful
+   `regby_content` may be empty too.
+4. **No reason strings are sent.** `Code Not Found`, `Code Expired`,
+   `Code Already Redeemed`, `Service Busy, Try Again` and `Invalid Request`
+   can stay on the app's allowlist only for older middleware builds.
 5. **Pairing tags.** Read `from` (merchant hex pubkey) on `regby_content` and
    handle the new `regby_content_delivered` notice (`e` = the merchant's own
    `request_regby_code`, `to` = customer hex pubkey). Both tags are

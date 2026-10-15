@@ -99,7 +99,7 @@ Event:
   "sig": "…"
 }
 ```
-Server: `store.redeem("42891337")` → found + unexpired → returns the content and the merchant who asked for it, and **consumes** the code: it stamps `redeemed_at`, so any later redeem gets `Code Already Redeemed` for the next hour. The row (content included) stays 48 h for debugging, then is deleted.
+Server: `store.redeem("42891337")` → found + unexpired → returns the content and the merchant who asked for it, and **consumes** the code: it stamps `redeemed_at`, so a later redeem inside the code's minute gets `regby_code_already_redeemed`, and after it the code's age decides (see the error variant). The row (content included) stays 72 h for debugging, then is deleted.
 
 ## Hop 4 - middleman → customer (`i: regby_content`)
 
@@ -159,27 +159,24 @@ Event:
 code it is showing. `to` is the customer's hex pubkey, in plaintext. An app
 that predates this intent drops the event as unknown.
 
-## Error variant - bad / expired code (reuses the value intent, replaces hop 4)
+## Error variant - bad / expired code (own intent, replaces hop 4)
 
-There is **no `error` intent**. A failure reply carries the request's success
-intent (`regby_code` for a `request_regby_code`, `regby_content` for a
-`request_regby_content`) but its `content` is a reason string instead of a
-value. The reasons are a fixed list, whitelist-sanitised before display.
-Content is opaque, so its shape tells nothing: a successful `regby_content`
-carries `["from", …]` and a failure never does.
+A failure reply names the outcome in its intent and carries **empty**
+`content` (a raw `""`, not encrypted: empty content never is, in either
+direction) and no `from` tag. Content is opaque and may be
+empty on a success too, so the client reads the intent, never the content, to
+tell them apart.
 
-Decrypted `content`:
-```
-Code Not Found
-```
-Event tags: `["p", customer]`, `["e", <customer request id>]`, `["i","regby_content"]` (redeem
-failure) or `["i","regby_code"]` (mint failure), `["expiration", …]`.
-`content` is one of:
-- `"Code Already Redeemed"` - already redeemed once (inside its 1-min validity or after it), still retained (< 1 h old). Reply `i:regby_content`.
-  - This includes a redeem whose reply no relay accepted: the code is consumed before the reply is published (at-most-once), so a dropped reply burns it and the customer's retry lands here. Recovery is a re-mint at the POS; the server logs `Code consumed but its reply reached no relay`.
-- `"Code Expired"` - existed but past the 1-min validity and never redeemed (still retained, < 1 h old). Reply `i:regby_content`.
-- `"Code Not Found"` - never minted, or more than 1 h old. Reply `i:regby_content`. The number itself stays reserved for 48 h, so it is never issued to another request before then.
-- `"Service Busy, Try Again"` - mint-time store overflow. Reply `i:regby_code`.
+Event tags: `["p", <requester>]`, `["e", <request id>]`, `["i", <failure intent>]`,
+`["expiration", …]`. A code is in exactly one state at a time, set by its age
+from the merchant's request; each later state overrides the earlier, so a used
+code reads `expired` once its minute is over. The failure intent is one of:
+- `regby_code_already_redeemed` - already redeemed, still inside its 1-min validity. Answers a `request_regby_content`.
+  - This includes a redeem whose reply no relay accepted: the code is consumed before the reply is published (at-most-once), so a dropped reply burns it and the customer's retry lands here (or on `regby_code_expired` once the minute is over). Recovery is a re-mint at the POS; the server logs `Code consumed but its reply reached no relay`.
+- `regby_code_expired` - past the 1-min validity, used or not, under 1 h old. Answers a `request_regby_content`.
+- `regby_code_locked` - 1 h to 72 h old: the number is held back so it is never issued to another request before then. Answers a `request_regby_content`, and counts as a guess toward the blacklist.
+- `regby_code_not_found` - never minted, or more than 72 h old. Answers a `request_regby_content`, and counts as a guess.
+- `regby_code_busy` - mint-time store overflow. Answers a `request_regby_code`, to the merchant.
 
 ## Notes
 
@@ -187,18 +184,18 @@ failure) or `["i","regby_code"]` (mint failure), `["expiration", …]`.
 - Intent is the `["i",<intent>]` tag (signed → authenticated); no `type` field, no `requestId`.
 - Correlation is the `["e", <request-event-id>]` reply tag.
 - Server subscription: `{ kinds:[4], "#p":[MID], "#i":["request_regby_code","request_regby_content"] }`.
-- Code validity = 1 min, anchored to the merchant request's `created_at` (skew-clamped). Single-use: the first redeem consumes it. A used code answers `Code Already Redeemed` and a lapsed, never-used one `Code Expired`, each for 1 h, then `Code Not Found`. The number is not reissued for 48 h.
+- Code validity = 1 min, anchored to the merchant request's `created_at` (skew-clamped). Single-use: the first redeem consumes it. A used code answers `regby_code_already_redeemed` inside its minute; then any code answers `regby_code_expired` until 1 h, `regby_code_locked` until 72 h, then `regby_code_not_found`. The number is not reissued for 72 h.
 - Relay retention = NIP-40 `expiration` = `created_at + REGBY_EVENT_EXPIRY_SECONDS` (default 72 h less a minute) on every event (maintenance buffer, unrelated to code validity).
 - **Active cleanup**: once a reply's expiration passes, the middleman publishes a NIP-09 `kind 5`
   deletion referencing its own reply event ids (batched), since NIP-40 is advisory and not all relays honor
   it. Example: `{ "kind":5, "tags":[["k","4"],["e","<reply-id>"],…], "content":"regby expired" }`. Only the
   middleman's own events - inbound merchant/customer events are theirs to delete.
 - **Persistence**: the code store is SQLite (`node:sqlite`, base `REGBY_DB_PATH`), so codes survive a
-  restart - a reboot no longer makes prior codes `Code Not Found`. The deletion queue stays in-memory
+  restart - a reboot no longer makes prior codes not found. The deletion queue stays in-memory
   (covers replies from the current process; older ones fall back to NIP-40 relay expiry), so there's no
   boot wipe of own events.
 - **Daily rotation**: a new SQLite file is opened per UTC day (nested `YYYY/MM/regby-YYYY-MM-DD.db` from `REGBY_DB_PATH`),
   switched at 00:00 UTC; old files are kept on disk. Only the current day's file is read/written, but
-  opening it copies in the codes from the last 48 h out of every earlier day file, so a code minted just before midnight
-  still works after the roll and no number is reissued within 48 h. Each row also stores `created_at`
-  (wall-clock mint time, the start of the 48 h reuse window).
+  opening it copies in the codes from the last 72 h out of every earlier day file, so a code minted just before midnight
+  still works after the roll and no number is reissued within 72 h. Each row also stores `created_at`
+  (wall-clock mint time, the start of the 72 h reuse window).
