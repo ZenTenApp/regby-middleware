@@ -60,8 +60,6 @@ const REDEEM_FAILURE_INTENT: Record<RedeemFailureReason, FailureIntent> = {
  */
 const GUESS_REASONS: ReadonlySet<RedeemFailureReason> = new Set(['not-found', 'locked']);
 
-
-
 /** Collaborators a test can swap; production builds each from `Config`. */
 export interface BrokerDeps {
   transport: ReGBYTransport;
