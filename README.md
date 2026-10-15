@@ -7,7 +7,7 @@ The server never reads it. It mints a short **8-digit
 code** and returns it. Another peer (the customer) redeems the code; the server
 returns the original content, then **pairs the two peers**: the customer learns
 who the content came from (`from`) and the merchant who received it
-(`deliver_to`).
+(`to`).
 
 A `defifrom://` payment **confirmation** never passes through here. It is sent
 straight to the npub named in the invoice it answers, so there is nothing for a
@@ -37,7 +37,8 @@ comes from the event signature alone, never from a successful decrypt.
 
 - **Intent** rides the `['i', <intent>]` tag (single-letter → relay-indexable):
   `request_regby_code` / `regby_code` / `request_regby_content` / `regby_content`,
-  plus `regby_redeemed`, the server's notice to the merchant after a redeem.
+  plus `regby_content_delivered`, the server's notice to the merchant after a
+  redeem.
 - **No `error` intent**: a failure reuses the request's success intent
   (`regby_code` for a `request_regby_code`, `regby_content` for a
   `request_regby_content`) and carries one of the fixed `REPLY_REASON`
@@ -55,26 +56,27 @@ comes from the event signature alone, never from a successful decrypt.
   minute, the DM relays' cap) on every event - a maintenance/retention buffer
   only, unrelated to code validity.
 
-| direction          | `i` tag                 | `content` (decrypted)        |
-| ------------------ | ----------------------- | ---------------------------- |
-| merchant → server  | `request_regby_code`    | any text (e.g. `defito://…`) |
-| server → merchant  | `regby_code`            | `42891337` *or* reason       |
-| customer → server  | `request_regby_content` | `42891337`                   |
-| server → customer  | `regby_content`         | that text *or* reason        |
-| server → merchant  | `regby_redeemed`        | `42891337`                   |
+| direction         | `i` tag                   | `content` (decrypted)        |
+| ----------------- | ------------------------- | ---------------------------- |
+| merchant → server | `request_regby_code`      | any text (e.g. `defito://…`) |
+| server → merchant | `regby_code`              | `42891337` *or* reason       |
+| customer → server | `request_regby_content`   | `42891337`                   |
+| server → customer | `regby_content`           | that text *or* reason        |
+| server → merchant | `regby_content_delivered` | `42891337`                   |
 
 After a successful redeem the customer's `regby_content` also carries
 `['from', <merchant hex pubkey>]`, and the server sends the merchant
-`regby_redeemed` with `['e', <merchant's request id>]` and
-`['deliver_to', <customer hex pubkey>]`, whether or not the customer's reply
-reached a relay (the code is used up either way). Both values are 64-character
+`regby_content_delivered` with `['e', <merchant's request id>]` and
+`['to', <customer hex pubkey>]`, whether or not the customer's reply
+reached a relay (the code is used up either way, so "delivered" means
+released by the server, not received by the customer). Both values are 64-character
 hex pubkeys, like a `p` tag. The merchant's is the key that signed the
 request, not the invoice's own `nostr=`. **These tags are plaintext**: anyone reading the relay
 sees which merchant and customer met. A refused redeem sends neither.
 
 Empty content is a valid `request_regby_code` payload and runs the same five
 events: the customer's `regby_content` carries an (encrypted) empty string, and
-the `from` / `deliver_to` tags pair the two peers. Whitespace-only content is
+the `from` / `to` tags pair the two peers. Whitespace-only content is
 still dropped as noise.
 
 ## Behaviour

@@ -49,7 +49,7 @@ can say whether the reply reached a relay (`delivered`).
 | `redeem` | the code was valid and is now used up | customer | the content, tagged `from` = merchant | typed code | yes | - | true / false |
 | `redeem_refused` | the code could not be used | customer | `Code Expired` / `Code Already Redeemed` / `Code Not Found` | typed code | - | `expired` / `redeemed` / `not-found` | true / false |
 | `blacklisted` | a code guesser, blocked for `REGBY_BLACKLIST_SECONDS` (default 24 h) | customer | **no reply** | typed code | - | `guessing` | null |
-| `merchant_notified` | after a `redeem`, the merchant was told their code is used up (`regby_redeemed`, tagged `deliver_to` = customer). Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_redeemed`, content = the code | redeemed code | - | - | true / false |
+| `merchant_notified` | after a `redeem`, the merchant was told their code is used up (`regby_content_delivered`, tagged `to` = customer). Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_content_delivered`, content = the code | redeemed code | - | - | true / false |
 
 The broker never refuses content for what it says (see README), so no event
 records a refused payload. History written by a broker from before that

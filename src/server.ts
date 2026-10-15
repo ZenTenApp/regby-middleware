@@ -6,7 +6,8 @@
  *   request_regby_content → look up code, reply `i:regby_content` (content =
  *                           the stored content, single-use, or a reason
  *                           string on failure); a successful one also sends
- *                           the merchant `i:regby_redeemed` (content = the code)
+ *                           the merchant `i:regby_content_delivered`
+ *                           (content = the code)
  * Content is opaque: never judged here, only carried (see `protocol.ts`).
  * There is no `error` intent - a failure reuses the request's success intent and
  * puts a fixed `REPLY_REASON` in `content`. Every reply links to the request
@@ -26,13 +27,13 @@ import { Blacklist } from './blacklist.ts';
 import { BoundedMap } from './bounded-map.ts';
 import { nowSeconds } from './time.ts';
 import {
-  DELIVER_TO_TAG,
+  CONTENT_DELIVERED_INTENT,
   extractIntent,
   FROM_TAG,
   parseInbound,
-  REDEEMED_INTENT,
   REPLY_INTENT,
   REPLY_REASON,
+  TO_TAG,
   type InboundMessage,
   type OutboundIntent,
 } from './protocol.ts';
@@ -299,11 +300,15 @@ export class ReGBYBroker {
       recipientPubkey: origin.merchantPubkey,
       requestEventId: origin.requestEvent,
     };
-    const delivered = await this.answer(target, REDEEMED_INTENT, code, { event: 'merchant_notified', code }, [
-      [DELIVER_TO_TAG, customerPubkey],
-    ]);
+    const delivered = await this.answer(
+      target,
+      CONTENT_DELIVERED_INTENT,
+      code,
+      { event: 'merchant_notified', code },
+      [[TO_TAG, customerPubkey]],
+    );
     if (!delivered) {
-      logger.warn('Merchant redeem notice reached no relay', {
+      logger.warn('Merchant content-delivered notice reached no relay', {
         to: origin.merchantPubkey.slice(0, 12),
       });
     }

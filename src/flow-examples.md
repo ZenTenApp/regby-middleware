@@ -14,9 +14,9 @@ runs the same five hops (empty only pairs the peers). Judging the content is
 the recipient's job.
 
 - Intent rides the `["i", <intent>]` tag: `request_regby_code` / `regby_code` /
-  `request_regby_content` / `regby_content` / `regby_redeemed`. There is **no `error` intent**: a
-  failure reuses the request's success intent and carries the reason in
-  `content`.
+  `request_regby_content` / `regby_content` / `regby_content_delivered`. There
+  is **no `error` intent**: a failure reuses the request's success intent and
+  carries the reason in `content`.
 - Replies link to the request via `["e", <request-event-id>]` (the client
   matches a reply to the request it published - no in-band id).
 - `["expiration", <unix>]` (NIP-40) = `created_at + REGBY_EVENT_EXPIRY_SECONDS`
@@ -128,7 +128,7 @@ Event:
 Customer matches by `["e", <its request id>]`, decrypts → URI → `ingestPaymentUri` → confirm → pay.
 `from` is the hex pubkey of the key that signed hop 1 (plaintext, unlike the content).
 
-## Hop 5 - middleman → merchant (`i: regby_redeemed`)
+## Hop 5 - middleman → merchant (`i: regby_content_delivered`)
 
 Sent right after hop 4, only for a successful redeem, and even when hop 4
 reached no relay: the code is used up either way, and the merchant has to know
@@ -147,16 +147,16 @@ Event:
   "tags": [
     ["p","b0b0...b0b0"],
     ["e","9c1d2e3f...0011111"],
-    ["i","regby_redeemed"],
+    ["i","regby_content_delivered"],
     ["expiration","1750582861"],
-    ["deliver_to","c0c0...c0c0"]
+    ["to","c0c0...c0c0"]
   ],
   "content": "AgD9xK2m...==",
   "id": "…", "sig": "…"
 }
 ```
 `e` is the merchant's own hop 1 event, so the POS can match the notice to the
-code it is showing. `deliver_to` is the customer's hex pubkey, in plaintext. An app
+code it is showing. `to` is the customer's hex pubkey, in plaintext. An app
 that predates this intent drops the event as unknown.
 
 ## Error variant - bad / expired code (reuses the value intent, replaces hop 4)
@@ -183,7 +183,7 @@ failure) or `["i","regby_code"]` (mint failure), `["expiration", …]`.
 
 ## Notes
 
-- `content` shown decrypted - wire carries only NIP-04 ciphertext + plaintext tags (`from` / `deliver_to` included).
+- `content` shown decrypted - wire carries only NIP-04 ciphertext + plaintext tags (`from` / `to` included).
 - Intent is the `["i",<intent>]` tag (signed → authenticated); no `type` field, no `requestId`.
 - Correlation is the `["e", <request-event-id>]` reply tag.
 - Server subscription: `{ kinds:[4], "#p":[MID], "#i":["request_regby_code","request_regby_content"] }`.
