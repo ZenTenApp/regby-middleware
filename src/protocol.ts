@@ -11,17 +11,20 @@
  * Transport is a standard encrypted **DM (kind 4)** so events are treated as
  * messages. Design:
  *   - `content` is the **raw value**, NIP-04 encrypted: the sender's content,
- *     or the bare eight-digit code. No JSON wrapper.
+ *     or the bare eight-digit code. No JSON wrapper. Empty content is the
+ *     exception: it travels as a raw `""`, never encrypted (`EMPTY_CONTENT`).
+ *     Some NIP-04 clients or relays may choke on a kind 4 with empty content;
+ *     untested on our relays so far.
  *   - the message **intent** rides a plaintext `['i', <intent>]` tag -
  *     single-letter `i` is relay-indexable, so the server subscribes
  *     `#i:INBOUND_INTENTS` and pulls only inbound regby traffic.
  *   - replies carry `['e', <request-event-id>]` (Nostr-native reply linkage)
  *     so the client matches a reply to the request it published - no in-band
  *     correlation id needed.
- *   - there is **no `error` intent**. A failure reply reuses the success intent
- *     (`regby_code` for a `request_regby_code`, `regby_content` for a
- *     `request_regby_content`) and carries a `REPLY_REASON` string in
- *     `content` instead of a value.
+ *   - a failure reply names the outcome in its intent (`FAILURE_INTENT`,
+ *     e.g. `regby_code_expired`) and carries empty `content` and no pairing
+ *     tag. Empty content alone means nothing: a success may carry empty
+ *     content too, so the client reads the intent first.
  *   - relay retention is bounded by NIP-40 `['expiration', unixSec]`.
  *
  * Tags are covered by the event signature, so intent/linkage are authenticated.
@@ -31,6 +34,13 @@
 /** Encrypted DM kind: NIP-04 envelope and NIP-04 ciphertext, which is what
  *  every client reading these relays expects under this kind. */
 export const REGBY_KIND = 4;
+
+/**
+ * Empty content on the wire, in both directions: sent as-is, never encrypted,
+ * and read back as empty without a decrypt. NIP-04 of `""` would still be a
+ * full ciphertext block, so a raw `""` is what lets anyone see "no content".
+ */
+export const EMPTY_CONTENT = '';
 
 /** Codes are exactly eight decimal digits. */
 export const REGBY_CODE_RE = /^\d{8}$/;
@@ -67,23 +77,26 @@ export const INBOUND_INTENTS = ['request_regby_code', 'request_regby_content'] a
 /** The two intents the middleman accepts from clients. */
 export type InboundIntent = (typeof INBOUND_INTENTS)[number];
 
-/** The success intent that answers each inbound request (reused for errors). */
+/** The success intent that answers each inbound request. */
 export const REPLY_INTENT = {
   request_regby_code: 'regby_code',
   request_regby_content: 'regby_content',
 } as const satisfies Record<InboundIntent, string>;
 
 /**
- * Every reason a failure reply can carry. The app shows only these exact
- * strings (`sanitizeReGBYError`) and renders anything else as a generic
- * fallback, so a new or reworded reason needs an app release before its text
- * reaches a user. Pinned against the app's allowlist by the parity tests.
+ * The intent of every failure reply, sent with empty content. `busy` answers a
+ * `request_regby_code` (no free code to mint), the rest a
+ * `request_regby_content`, one per state of the code (see `store.ts`): used
+ * inside its minute, lapsed (used or not), held back from reuse, unknown. The app must know each one: an intent it does not
+ * recognise never matches its pending request, so a new failure needs an app
+ * release first. Pinned against the app by the parity tests.
  */
-export const REPLY_REASON = {
-  notFound: 'Code Not Found',
-  expired: 'Code Expired',
-  redeemed: 'Code Already Redeemed',
-  busy: 'Service Busy, Try Again',
+export const FAILURE_INTENT = {
+  notFound: 'regby_code_not_found',
+  expired: 'regby_code_expired',
+  redeemed: 'regby_code_already_redeemed',
+  locked: 'regby_code_locked',
+  busy: 'regby_code_busy',
 } as const;
 
 /**
@@ -96,8 +109,13 @@ export const REPLY_REASON = {
  */
 export const CONTENT_DELIVERED_INTENT = 'regby_content_delivered';
 
-/** Every intent the middleman emits; a failure reuses the matching reply intent. */
-export type OutboundIntent = (typeof REPLY_INTENT)[InboundIntent] | typeof CONTENT_DELIVERED_INTENT;
+export type FailureIntent = (typeof FAILURE_INTENT)[keyof typeof FAILURE_INTENT];
+
+/** Every intent the middleman emits. */
+export type OutboundIntent =
+  | (typeof REPLY_INTENT)[InboundIntent]
+  | FailureIntent
+  | typeof CONTENT_DELIVERED_INTENT;
 
 /**
  * Plaintext tags naming the counterparty by hex pubkey (as `p` does), so each
@@ -131,8 +149,8 @@ export type ParseResult =
 /**
  * Read the inbound intent from an event's tags. Returns the first recognised
  * `['i', 'request_regby_code' | 'request_regby_content']`, or null when
- * absent/unknown. The two outbound intents (`regby_code`/`regby_content`) are
- * NOT accepted here, so an echoed-back reply never enters processing.
+ * absent/unknown. Outbound intents are NOT accepted here, so an echoed-back
+ * reply never enters processing.
  */
 export function extractIntent(tags: string[][]): InboundIntent | null {
   for (const tag of tags) {

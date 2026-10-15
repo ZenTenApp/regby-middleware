@@ -6,11 +6,15 @@
  *
  * Validity timestamps per row, both anchored to the merchant request's own
  * `created_at` (skew-clamped by the caller, passed in as `startedAt`):
- *   - `expires_at`   = startedAt + ttl     → code **validity** (1 min). Past it
- *     an unredeemed code reports `expired`, but the row is KEPT.
- *   - `retain_until` = startedAt + retain  → **answer window** (1 h). Until then
- *     a lapsed code still reports `expired` (clear UX: "the code was real but
- *     lapsed"); past it, `not-found`.
+ *   - `expires_at`   = startedAt + ttl     → code **validity** (1 min).
+ *   - `retain_until` = startedAt + retain  → **answer window** (1 h).
+ *
+ * **One state at a time, by age**, each later one overriding the earlier, so
+ * whether a code was ever redeemed matters only inside its minute:
+ *   - inside validity: unused → served and consumed; used → `redeemed`.
+ *   - past validity, inside the answer window → `expired`, used or not.
+ *   - past the answer window, row still held → `locked`.
+ *   - no row (never issued, or deleted after 72 h) → `not-found`.
  *
  * More columns: `created_at` = the server wall-clock at mint, which never
  * decides validity but does decide when the number may be reused (below),
@@ -19,21 +23,20 @@
  * event, so a redeem can name the merchant to the customer and notify the
  * merchant on their own request thread.
  *
- * **No reuse for 48 h**: a row is DELETED only `CODE_REUSE_SECONDS` (48 h) after
+ * **No reuse for 72 h**: a row is DELETED only `CODE_REUSE_SECONDS` (72 h) after
  * its `created_at`, so the primary key keeps that number out of every mint until
- * then. Past the answer window the row still exists but redeem reports
- * `not-found`, exactly as if it were gone. The 48 h is a constant, not config:
- * it is a guarantee to customers holding an old code, not a tuning knob.
+ * then, and redeem reports `locked` meanwhile. The 72 h is a constant, not
+ * config: it is a guarantee to customers holding an old code, not a tuning knob.
  *
  * **Single-use**: the first successful redeem consumes the code - it stamps
- * `redeemed_at`. Any later redeem inside the answer window reports `redeemed`,
- * inside validity or past it. The consume is a compare-and-set on the row
+ * `redeemed_at`. A later redeem inside validity reports `redeemed`; past it,
+ * the age decides (above). The consume is a compare-and-set on the row
  * itself, so a code is redeemed at most once, and the store reads time through
  * `monotonic`, so a wall clock stepping backward can't revive a lapsed code
  * either (within one process).
  *
  * **Content stays for debugging**: a row keeps its content and origin until it is
- * deleted with the row, 48 h after issue, so the live file shows what every
+ * deleted with the row, 72 h after issue, so the live file shows what every
  * recent code was for. Deleted rows are zeroed (`secure_delete`) and the sweep
  * checkpoints the WAL so their page images leave the `-wal` log too. Archived
  * daily files keep neither: rotation and startup wipe them (below).
@@ -63,7 +66,7 @@ export interface CodeOrigin {
   requestEvent: string;
 }
 
-export type RedeemFailureReason = 'not-found' | 'expired' | 'redeemed';
+export type RedeemFailureReason = 'not-found' | 'locked' | 'expired' | 'redeemed';
 
 /** `origin` is null only for a code minted before origins were stored. */
 export type RedeemResult =
@@ -82,6 +85,7 @@ export interface CodeStoreLike {
 interface CodeRow {
   /** The opaque content; the column predates content being more than a URI. */
   content: string;
+  created_at: number;
   expires_at: number;
   retain_until: number;
   redeemed_at: number | null;
@@ -133,7 +137,7 @@ const DAY_SECONDS = 86_400;
  * A code number is never issued again within this long of its last issue, so a
  * stale code in a customer's hands can never open someone else's invoice.
  */
-export const CODE_REUSE_SECONDS = 2 * DAY_SECONDS;
+export const CODE_REUSE_SECONDS = 3 * DAY_SECONDS;
 
 /** A row knows who asked for it: both origin columns are set (they are written together). */
 const HAS_ORIGIN_SQL = 'merchant_pubkey IS NOT NULL AND request_event IS NOT NULL';
@@ -188,7 +192,7 @@ export class CodeStore implements CodeStoreLike {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     this.selectStmt = this.db.prepare(
-      'SELECT content, expires_at, retain_until, redeemed_at, merchant_pubkey, request_event FROM codes WHERE code = ?',
+      'SELECT content, created_at, expires_at, retain_until, redeemed_at, merchant_pubkey, request_event FROM codes WHERE code = ?',
     );
     // Guarded on the row, not on the caller's earlier read: only an unused,
     // unexpired row flips, so `changes` alone is the redeem verdict. A row from
@@ -208,8 +212,8 @@ export class CodeStore implements CodeStoreLike {
 
   /**
    * Mint a unique code for a URI, validity anchored to `startedAt`. Never a
-   * number issued in the last 48 h: those rows still hold the primary key.
-   * Returns null when the store is at capacity (codes issued in the last 48 h),
+   * number issued in the last 72 h: those rows still hold the primary key.
+   * Returns null when the store is at capacity (codes issued in the last 72 h),
    * no free code was found, or the anchor is already past validity (all "try
    * again").
    */
@@ -240,19 +244,16 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Redeem a code. Valid → `ok`, and the code is consumed (single-use). Already
-   * redeemed → `redeemed`, until retention lapses. Never redeemed and past
-   * validity → `expired`, likewise. Unknown or past the answer window →
-   * `not-found` (the row itself stays until the 48 h reuse window ends).
+   * Redeem a code: the state its age puts it in (see the header). Valid and
+   * unused → `ok`, and the code is consumed (single-use).
    */
   redeem(code: string): RedeemResult {
     const row = this.selectStmt.get(code) as CodeRow | undefined;
-    if (!row) return { ok: false, reason: 'not-found' };
-
     const now = this.now();
-    // Past the answer window: gone as far as the customer is concerned, though
-    // the row stays to block reuse of the number.
-    if (now >= row.retain_until) return { ok: false, reason: 'not-found' };
+    // A row past the reuse window is gone, even before the sweep deletes it.
+    if (!row || now >= row.created_at + CODE_REUSE_SECONDS) return { ok: false, reason: 'not-found' };
+    if (now >= row.retain_until) return { ok: false, reason: 'locked' };
+    if (now >= row.expires_at) return { ok: false, reason: 'expired' };
     if (row.redeemed_at !== null) return { ok: false, reason: 'redeemed' };
     if (Number(this.consumeStmt.run(now, code).changes) === 1) {
       const origin =
@@ -261,11 +262,12 @@ export class CodeStore implements CodeStoreLike {
           : null;
       return { ok: true, content: row.content, origin };
     }
-    // Never redeemed, and the guarded consume refused it: it has lapsed.
+    // Inside its minute, unused, yet the guarded consume refused it: a wiped
+    // archive row, which has nothing left to serve.
     return { ok: false, reason: 'expired' };
   }
 
-  /** Drop rows, content included, past the 48 h reuse window. */
+  /** Drop rows, content included, past the 72 h reuse window. */
   private purge(): void {
     this.sweepStmt.run(this.now() - CODE_REUSE_SECONDS);
   }
