@@ -156,7 +156,7 @@ test('a consumed code stays consumed when the wall clock steps backward', () => 
   assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
 });
 
-test('an invoice leaves the db and its -wal log with its row, 24 h after issue', () => {
+test('content leaves the db and its -wal log with its row, at the end of the reuse window', () => {
   withTempDb('wal', (path) => {
     const clock = fixedClock();
     const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
@@ -187,7 +187,7 @@ test('past validity but within retention reports expired and KEEPS the row', () 
   assert.equal(store.size, 1);
 });
 
-test('past the answer window: not-found, but the row holds its number for 24 h', () => {
+test('past the answer window: not-found, but the row holds its number for the reuse window', () => {
   const clock = fixedClock();
   const store = memStore(clock);
   const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
@@ -197,10 +197,10 @@ test('past the answer window: not-found, but the row holds its number for 24 h',
   assert.equal(store.size, 1); // still reserved
   clock.tick(CODE_REUSE_SECONDS - RETAIN - 1);
   store.sweep();
-  assert.equal(store.size, 1); // one second short of 24 h
+  assert.equal(store.size, 1); // one second short of the reuse window
   clock.tick(1);
   store.sweep();
-  assert.equal(store.size, 0); // 24 h after issue: the number is free again
+  assert.equal(store.size, 0); // end of the reuse window: the number is free again
 });
 
 test('redeem of unknown code reports not-found', () => {
@@ -213,14 +213,14 @@ test('mint returns null when at capacity', () => {
   assert.equal(store.mint('defito://b', 1000, ORIGIN), null);
 });
 
-test('capacity counts every code issued in the last 24 h', () => {
+test('capacity counts every code issued within the reuse window', () => {
   const clock = fixedClock();
   const store = memStore(clock, 1);
   assert.ok(store.mint('defito://a', clock.now(), ORIGIN));
   clock.tick(RETAIN);
   assert.equal(store.mint('defito://b', clock.now(), ORIGIN), null); // still reserved
   clock.tick(CODE_REUSE_SECONDS - RETAIN);
-  // mint() purges first, so the 24-h-old reservation is reclaimed.
+  // mint() purges first, so the expired reservation is reclaimed.
   assert.ok(store.mint('defito://b', clock.now(), ORIGIN));
   assert.equal(store.size, 1);
 });
@@ -258,18 +258,25 @@ test('RotatingCodeStore switches files at the UTC day boundary', () => {
     const unused = store.mint('defito://unused', clock.now(), ORIGIN);
     assert.ok(minted && unused);
     assert.deepEqual(store.redeem(minted.code), { ok: true, content: 'defito://base/0xabc', origin: ORIGIN });
-    // Exactly 24 h later, on the next UTC day: the codes' reuse window has just
-    // closed, so nothing is carried over and the new file starts empty. The
+    // 24 h later, on the next UTC day: past the answer window, but the 48 h
+    // reuse window still holds both numbers, so both are carried over. The
     // redeem is the op that triggers the lazy rotation.
     clock.tick(86_400);
-    assert.notEqual(dailyDbPath(base, clock.now()), day1);
+    const day2 = dailyDbPath(base, clock.now());
+    assert.notEqual(day2, day1);
     assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
+    assert.equal(store.size, 2);
+    // No sweep ran before the roll; retire() alone left the archive with no content.
+    assert.deepEqual([...contentOnDisk(day1).values()], ['', '']);
+    // Exactly 48 h after issue, on the day after: the reuse window has closed,
+    // so the roll (triggered by a redeem, no sweep) carries nothing.
+    clock.tick(86_400);
+    assert.deepEqual(store.redeem('00000000'), { ok: false, reason: 'not-found' });
     assert.equal(store.size, 0);
     store.close();
-    // No sweep ran before the roll; retire() alone left the archive with no invoice.
-    assert.deepEqual([...contentOnDisk(day1).values()], ['', '']);
   } finally {
     rmDb(day1);
+    rmDb(dailyDbPath(base, 1_700_000_000 + 86_400));
     rmDb(dailyDbPath(base, clock.now()));
   }
 });
@@ -313,7 +320,7 @@ test('a code minted just before midnight still redeems after it, once', () => {
   }
 });
 
-test('a restart on a new day carries yesterday\'s reservations, then frees them at 24 h', () => {
+test('a restart on a new day carries yesterday\'s reservations, then frees them at the end of the window', () => {
   const clock = fixedClock(BEFORE_MIDNIGHT);
   const base = join(tmpdir(), `regby-carry-restart-${process.pid}.db`);
   const day1 = dailyDbPath(base, clock.now());
@@ -549,5 +556,87 @@ test('a daily file holding both uri and content refuses to open', () => {
     `);
     db.close();
     assert.throws(() => new CodeStore(TTL, RETAIN, 100, path), /both uri and content/);
+  });
+});
+
+test('after a day of downtime, a startup carries from the day before yesterday too', () => {
+  const clock = fixedClock(BEFORE_MIDNIGHT);
+  const base = join(tmpdir(), `regby-carry-gap-${process.pid}.db`);
+  const day1 = dailyDbPath(base, clock.now());
+  try {
+    const first = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
+    const minted = first.mint('defito://base/0xabc', clock.now(), ORIGIN);
+    assert.ok(minted);
+    first.close();
+    // Down for all of the next UTC day: no file for it. Back on the day after,
+    // still inside the 48 h window.
+    clock.tick(86_400 + 3600);
+    // Capacity 1: the carried reservation fills the store, so it is really held.
+    const second = new RotatingCodeStore(TTL, RETAIN, 1, base, clock.now);
+    assert.equal(second.size, 1);
+    assert.equal(second.mint('defito://x', clock.now(), ORIGIN), null);
+    second.close();
+    assert.equal(contentOnDisk(dailyDbPath(base, clock.now())).get(minted.code), 'defito://base/0xabc');
+  } finally {
+    rmDb(day1);
+    rmDb(dailyDbPath(base, clock.now()));
+  }
+});
+
+test('a code redeemed in a later day file stays redeemed when an older copy is carried too', () => {
+  const clock = fixedClock(BEFORE_MIDNIGHT);
+  const base = join(tmpdir(), `regby-carry-order-${process.pid}.db`);
+  const day1 = dailyDbPath(base, clock.now());
+  const day2 = dailyDbPath(base, clock.now() + 86_400);
+  try {
+    const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
+    const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
+    assert.ok(minted);
+    clock.tick(40); // next day: carried into day2
+    assert.ok(store.redeem(minted.code).ok); // redeemed in day2 only
+    store.close();
+    // day1 was retired with a stale, unredeemed copy. Restart a day later: both
+    // day1 and day2 are inside the window, and day2's redeemed state must win.
+    clock.tick(86_400);
+    new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now).close();
+    assert.notEqual(redeemedAtOnDisk(dailyDbPath(base, clock.now()), minted.code), null);
+  } finally {
+    rmDb(day1);
+    rmDb(day2);
+    rmDb(dailyDbPath(base, clock.now()));
+  }
+});
+
+/** A row's `redeemed_at`, read straight from the file (store closed). */
+function redeemedAtOnDisk(path: string, code: string): number | null {
+  const db = new DatabaseSync(path);
+  try {
+    const row = db.prepare('SELECT redeemed_at FROM codes WHERE code = ?').get(code) as
+      | { redeemed_at: number | null }
+      | undefined;
+    return row?.redeemed_at ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+test('a redeem recorded in any carried copy wins, whatever order the copies land in', () => {
+  withTempDb('carry-upsert', (path) => {
+    const clock = fixedClock();
+    // Today's file already holds a stale, unredeemed copy (a carry that ran
+    // before a failed rotation); the source holds the same code, redeemed.
+    const source = `${path}.src`;
+    const at = clock.now();
+    const src = new CodeStore(TTL, RETAIN, 100, source, clock.now);
+    const minted = src.mint('defito://base/0xabc', at, ORIGIN);
+    assert.ok(minted);
+    const today = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+    today.carryFrom(source); // stale copy
+    assert.ok(src.redeem(minted.code).ok);
+    src.close();
+    today.carryFrom(source); // same code again, now redeemed
+    assert.deepEqual(today.redeem(minted.code), { ok: false, reason: 'redeemed' });
+    today.close();
+    rmDb(source);
   });
 });

@@ -88,24 +88,27 @@ export const REPLY_REASON = {
 
 /**
  * Unsolicited notice to the MERCHANT once their code is redeemed (content = the
- * code, `e` = the merchant's own `request_regby_code` event). Not a reply to the
- * merchant's latest message, so it has its own intent: an app that predates it
- * drops an unknown intent instead of reading it as a second `regby_code`.
+ * code, `e` = the merchant's own `request_regby_code` event). "Delivered" means
+ * the server released the content and used up the code, not that the customer's
+ * reply reached a relay. Not a reply to the merchant's latest message, so it has
+ * its own intent: an app that predates it drops an unknown intent instead of
+ * reading it as a second `regby_code`.
  */
-export const REDEEMED_INTENT = 'regby_redeemed';
+export const CONTENT_DELIVERED_INTENT = 'regby_content_delivered';
 
 /** Every intent the middleman emits; a failure reuses the matching reply intent. */
-export type OutboundIntent = (typeof REPLY_INTENT)[InboundIntent] | typeof REDEEMED_INTENT;
+export type OutboundIntent = (typeof REPLY_INTENT)[InboundIntent] | typeof CONTENT_DELIVERED_INTENT;
 
 /**
- * Plaintext tags naming the counterparty as an npub, so each side learns who
- * the server paired them with: `from` (the merchant) on the customer's
- * `regby_content`, `deliver_to` (the customer) on the merchant's
- * `regby_redeemed`. Unlike the content they are NOT encrypted: anyone reading
- * the relay sees which merchant and customer met. Accepted product trade-off.
+ * Plaintext tags naming the counterparty by hex pubkey (as `p` does), so each
+ * side learns who the server paired them with: `from` (the merchant) on the
+ * customer's `regby_content`, `to` (the customer) on the merchant's
+ * `regby_content_delivered`. Unlike the content they are NOT encrypted: anyone
+ * reading the relay sees which merchant and customer met. Accepted product
+ * trade-off.
  */
 export const FROM_TAG = 'from';
-export const DELIVER_TO_TAG = 'deliver_to';
+export const TO_TAG = 'to';
 
 /** A validated inbound message: a merchant code request, or a customer redeem. */
 export type InboundMessage =

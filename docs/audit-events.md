@@ -45,11 +45,11 @@ can say whether the reply reached a relay (`delivered`).
 | `event` | when | `pubkey` is | reply the app gets | `code` | `content` | `reason` | `delivered` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `code_issued` | content (any text) got a code | merchant | the code | issued code | yes | - | true / false |
-| `regby_busy` | no free code: `REGBY_STORE_MAX` codes were already issued in the last 24 h | merchant | `Service Busy, Try Again` | - | yes | - | true / false |
+| `regby_busy` | no free code: `REGBY_STORE_MAX` codes were already issued in the last 48 h | merchant | `Service Busy, Try Again` | - | yes | - | true / false |
 | `redeem` | the code was valid and is now used up | customer | the content, tagged `from` = merchant | typed code | yes | - | true / false |
 | `redeem_refused` | the code could not be used | customer | `Code Expired` / `Code Already Redeemed` / `Code Not Found` | typed code | - | `expired` / `redeemed` / `not-found` | true / false |
 | `blacklisted` | a code guesser, blocked for `REGBY_BLACKLIST_SECONDS` (default 24 h) | customer | **no reply** | typed code | - | `guessing` | null |
-| `merchant_notified` | after a `redeem`, the merchant was told their code is used up (`regby_redeemed`, tagged `deliver_to` = customer). Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_redeemed`, content = the code | redeemed code | - | - | true / false |
+| `merchant_notified` | after a `redeem`, the merchant was told their code is used up (`regby_content_delivered`, tagged `to` = customer). Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_content_delivered`, content = the code | redeemed code | - | - | true / false |
 
 The broker never refuses content for what it says (see README), so no event
 records a refused payload. History written by a broker from before that
@@ -81,8 +81,8 @@ code_issued ──▶ redeem                     (normal payment)
 redeem ──▶ merchant_notified                  (always follows a redeem of a code with a known merchant)
 ```
 
-To link them, query by `code`. Code numbers are not reused for 24 h, so within
-a day a code identifies a single request.
+To link them, query by `code`. Code numbers are not reused for 48 h, so within
+two days a code identifies a single request.
 
 ## reason values
 

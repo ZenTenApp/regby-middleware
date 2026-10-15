@@ -7,7 +7,7 @@ The server never reads it. It mints a short **8-digit
 code** and returns it. Another peer (the customer) redeems the code; the server
 returns the original content, then **pairs the two peers**: the customer learns
 who the content came from (`from`) and the merchant who received it
-(`deliver_to`).
+(`to`).
 
 A `defifrom://` payment **confirmation** never passes through here. It is sent
 straight to the npub named in the invoice it answers, so there is nothing for a
@@ -37,7 +37,8 @@ comes from the event signature alone, never from a successful decrypt.
 
 - **Intent** rides the `['i', <intent>]` tag (single-letter → relay-indexable):
   `request_regby_code` / `regby_code` / `request_regby_content` / `regby_content`,
-  plus `regby_redeemed`, the server's notice to the merchant after a redeem.
+  plus `regby_content_delivered`, the server's notice to the merchant after a
+  redeem.
 - **No `error` intent**: a failure reuses the request's success intent
   (`regby_code` for a `request_regby_code`, `regby_content` for a
   `request_regby_content`) and carries one of the fixed `REPLY_REASON`
@@ -55,25 +56,27 @@ comes from the event signature alone, never from a successful decrypt.
   minute, the DM relays' cap) on every event - a maintenance/retention buffer
   only, unrelated to code validity.
 
-| direction          | `i` tag                 | `content` (decrypted)        |
-| ------------------ | ----------------------- | ---------------------------- |
-| merchant → server  | `request_regby_code`    | any text (e.g. `defito://…`) |
-| server → merchant  | `regby_code`            | `42891337` *or* reason       |
-| customer → server  | `request_regby_content` | `42891337`                   |
-| server → customer  | `regby_content`         | that text *or* reason        |
-| server → merchant  | `regby_redeemed`        | `42891337`                   |
+| direction         | `i` tag                   | `content` (decrypted)        |
+| ----------------- | ------------------------- | ---------------------------- |
+| merchant → server | `request_regby_code`      | any text (e.g. `defito://…`) |
+| server → merchant | `regby_code`              | `42891337` *or* reason       |
+| customer → server | `request_regby_content`   | `42891337`                   |
+| server → customer | `regby_content`           | that text *or* reason        |
+| server → merchant | `regby_content_delivered` | `42891337`                   |
 
 After a successful redeem the customer's `regby_content` also carries
-`['from', <merchant npub>]`, and the server sends the merchant `regby_redeemed`
-with `['e', <merchant's request id>]` and `['deliver_to', <customer npub>]`,
-whether or not the customer's reply reached a relay (the code is used up
-either way). The merchant npub is the key that signed the request, not the
-invoice's own `nostr=`. **These tags are plaintext**: anyone reading the relay
+`['from', <merchant hex pubkey>]`, and the server sends the merchant
+`regby_content_delivered` with `['e', <merchant's request id>]` and
+`['to', <customer hex pubkey>]`, whether or not the customer's reply
+reached a relay (the code is used up either way, so "delivered" means
+released by the server, not received by the customer). Both values are 64-character
+hex pubkeys, like a `p` tag. The merchant's is the key that signed the
+request, not the invoice's own `nostr=`. **These tags are plaintext**: anyone reading the relay
 sees which merchant and customer met. A refused redeem sends neither.
 
 Empty content is a valid `request_regby_code` payload and runs the same five
 events: the customer's `regby_content` carries an (encrypted) empty string, and
-the `from` / `deliver_to` tags pair the two peers. Whitespace-only content is
+the `from` / `to` tags pair the two peers. Whitespace-only content is
 still dropped as noise.
 
 ## Behaviour
@@ -102,7 +105,7 @@ still dropped as noise.
 - **request_regby_content** → look up the code. Valid → reply `i:regby_content` with the content.
   **Single-use**: the first successful redeem consumes the code. A code
   expires after 1 min or its first use, whichever comes first. The live file
-  keeps every code's content, used or lapsed, until the row is deleted 24 h after
+  keeps every code's content, used or lapsed, until the row is deleted 48 h after
   issue, so recent codes can be debugged straight from the db; day rotation
   wipes every content left in the outgoing file. Consume happens before the reply is
   published, so a reply no relay accepted still burns the code (logged as a
@@ -117,16 +120,17 @@ still dropped as noise.
   `expires_at` (validity), `retain_until` (answer window,
   `REGBY_CODE_RETAIN_SECONDS`, after which redeem says `Code Not Found`) and
   `redeemed_at`.
-- **No code reuse for 24 h**: a row is deleted only 24 h after its
+- **No code reuse for 48 h**: a row is deleted only 48 h after its
   `created_at`, so its number cannot be issued again before then, even across
   midnight or a restart. A customer holding an old code can never open someone
-  else's invoice with it. Fixed, not configurable. Rows past 24 h are swept on
+  else's invoice with it. Fixed, not configurable. Rows past 48 h are swept on
   a 60s timer (also stale rate buckets + blacklist entries).
 - **Daily rotation**: a new SQLite file is opened per **UTC day**
   (nested `YYYY/MM/regby-YYYY-MM-DD.db` derived from `REGBY_DB_PATH`), switched at 00:00 UTC; old
   files are kept on disk as a daily archive. Only the current day's file is
   read or written, but opening it (at the roll, or on startup) copies in the
-  previous day's codes from the last 24 h, so midnight neither frees their
+  codes from the last 48 h out of every earlier day file that window reaches
+  (newest first, so a code's latest state wins), so midnight neither frees their
   numbers nor cuts short a code minted at 23:59. Archived files keep no
   invoices: the roll wipes the file it leaves, and startup wipes every older
   file, so a server down across several midnights leaves none behind either.
@@ -171,20 +175,20 @@ still dropped as noise.
 ### Safeguards
 
 - Per-sender sliding-window rate limit (`REGBY_RATE_MAX` / window).
-- Global mint rate ceiling (`REGBY_MINT_RATE_MAX`), sized so a full day of it
+- Global mint rate ceiling (`REGBY_MINT_RATE_MAX`), sized so a full 48 h of it
   fits `REGBY_STORE_MAX`: a flood from fresh pubkeys can't fill the store and
-  leave merchants on `Service Busy` for the 24 h its rows are held.
+  leave merchants on `Service Busy` for the 48 h its rows are held.
 - Global redeem rate ceiling (`REGBY_REDEEM_RATE_MAX`) plus per-sender
   not-found strikes (`REGBY_REDEEM_FAIL_MAX` → blacklist): bounds code-space
   enumeration / URI harvesting even by an attacker rotating fresh pubkeys.
 - Code-TTL anchor (`created_at`) skew-clamped so expiry can't be gamed.
-- Store capacity cap (`REGBY_STORE_MAX`, codes issued in any 24 h) - mints past
+- Store capacity cap (`REGBY_STORE_MAX`, codes issued in any 48 h) - mints past
   it reply `i:regby_code` with `Service Busy, Try Again` (a reason, not a code).
 - Processed event ids are remembered so a relay re-delivery can't double-mint.
 - Length cap (4096 characters) and a binary screen; no other content checks.
 - Decrypted content / live codes are logged only at `debug`.
 
-> **Trust note.** For 24 h after issue the server's live file holds the
+> **Trust note.** For 48 h after issue the server's live file holds the
 > plaintext content, so a compromised server could hand the customer different
 > content (for an invoice, a different recipient). The recipient must treat
 > every content as untrusted: the wallet still validates an invoice and the
@@ -291,7 +295,7 @@ psql "$REGBY_AUDIT_DATABASE_URL?sslmode=verify-full&sslrootcert=certs/db-ca.pem"
 | `src/protocol.ts`   | intents, tags, envelope checks (binary, size, code shape) |
 | `src/config.ts`     | env loading, key decode, pubkey derivation        |
 | `src/nostr.ts`      | relay pool, NIP-04 encrypt/decrypt, publish       |
-| `src/store.ts`      | SQLite code → content + origin store (1-min validity, single-use, 1-h answer window, 24-h row) + per-UTC-day file rotation |
+| `src/store.ts`      | SQLite code → content + origin store (1-min validity, single-use, 1-h answer window, 48-h row) + per-UTC-day file rotation |
 | `src/audit.ts`      | audit wire contract (record shape, validation)    |
 | `src/audit-sender.ts` | broker side: bounded queue, batched POST (HTTPS, or http to a local sink), backoff |
 | `src/audit-sink/`   | the audit service: HTTP intake, Postgres history, retention |

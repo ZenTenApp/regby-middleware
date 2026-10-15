@@ -1,13 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Event } from 'nostr-tools';
-import { npubEncode } from 'nostr-tools/nip19';
 import { ReGBYBroker } from './server.ts';
 import { CodeStore } from './store.ts';
 import type { Config } from './config.ts';
 import type { ReGBYTransport, ReplyTarget } from './nostr.ts';
 import type { AuditEntry, AuditSink } from './audit-sender.ts';
-import { DELIVER_TO_TAG, FROM_TAG, type OutboundIntent } from './protocol.ts';
+import { FROM_TAG, TO_TAG, type OutboundIntent } from './protocol.ts';
 
 const BROKER = 'f'.repeat(64);
 const MERCHANT = 'a'.repeat(64);
@@ -139,14 +138,14 @@ test('a redeem names the merchant to the customer and notifies the merchant', as
       target: { recipientPubkey: CUSTOMER, requestEventId: '3'.repeat(64) },
       intent: 'regby_content',
       content: INVOICE,
-      extraTags: [[FROM_TAG, npubEncode(MERCHANT)]],
+      extraTags: [[FROM_TAG, MERCHANT]],
     });
     // Event 5: the code back to the merchant, on their own request's thread.
     assert.deepEqual(toMerchant, {
       target: { recipientPubkey: MERCHANT, requestEventId: '1'.repeat(64) },
-      intent: 'regby_redeemed',
+      intent: 'regby_content_delivered',
       content: code,
-      extraTags: [[DELIVER_TO_TAG, npubEncode(CUSTOMER)]],
+      extraTags: [[TO_TAG, CUSTOMER]],
     });
     assert.deepEqual(
       audit.entries.map((e) => [e.event, e.pubkey, e.delivered]),
@@ -166,7 +165,7 @@ test('the merchant is notified even when the customer\'s reply reached no relay'
     await transport.inbound('3', CUSTOMER, 'request_regby_content', code);
     assert.deepEqual(
       transport.sent.map((r) => r.intent),
-      ['regby_code', 'regby_content', 'regby_redeemed'],
+      ['regby_code', 'regby_content', 'regby_content_delivered'],
     );
     const redeem = audit.entries.find((e) => e.event === 'redeem');
     assert.equal(redeem?.delivered, false);
@@ -181,7 +180,7 @@ test('a refused redeem notifies no one and tags no merchant', async () => {
     const refusal = transport.sent.at(-1);
     assert.equal(refusal?.content, 'Code Already Redeemed');
     assert.deepEqual(refusal?.extraTags, []);
-    assert.equal(transport.sent.filter((r) => r.intent === 'regby_redeemed').length, 1);
+    assert.equal(transport.sent.filter((r) => r.intent === 'regby_content_delivered').length, 1);
   });
 });
 
@@ -193,8 +192,8 @@ test('empty content runs the same five events, pairing the peers', async () => {
       transport.sent.map((r) => [r.intent, r.content, r.extraTags]),
       [
         ['regby_code', code, []],
-        ['regby_content', '', [[FROM_TAG, npubEncode(MERCHANT)]]],
-        ['regby_redeemed', code, [[DELIVER_TO_TAG, npubEncode(CUSTOMER)]]],
+        ['regby_content', '', [[FROM_TAG, MERCHANT]]],
+        ['regby_content_delivered', code, [[TO_TAG, CUSTOMER]]],
       ],
     );
     assert.deepEqual(

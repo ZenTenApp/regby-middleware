@@ -20,7 +20,7 @@ test('extractIntent rejects unknown / absent', () => {
 test('extractIntent rejects the outbound intents echoed back at us', () => {
   // Reply intents must never be processed inbound, so extractIntent (the sole
   // inbound gate) drops them before parseInbound.
-  for (const outbound of ['regby_code', 'regby_content', 'regby_redeemed']) {
+  for (const outbound of ['regby_code', 'regby_content', 'regby_content_delivered']) {
     assert.equal(extractIntent([['i', outbound]]), null, outbound);
   }
 });

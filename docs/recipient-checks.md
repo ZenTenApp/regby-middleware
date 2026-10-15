@@ -46,7 +46,7 @@ POS should run the same validation on its own invoice before sending
 These did not exist when the middleware judged content.
 
 1. **Empty content.** A `request_regby_code` with `""` is valid: it pairs the
-   peers through the `from` / `deliver_to` tags. The redeemed
+   peers through the `from` / `to` tags. The redeemed
    `regby_content` carries an encrypted `""`. `sanitizeRedeemedUri` throws
    `Empty payment request.` on it today; it must be treated as a successful
    pairing, not an error.
@@ -62,9 +62,9 @@ These did not exist when the middleware judged content.
    always eight digits, and `Service Busy, Try Again` is the only failure.
 4. **`Invalid Request` is no longer sent.** It can stay on the app's reason
    allowlist for older middleware builds.
-5. **Pairing tags.** Read `from` (merchant npub) on `regby_content` and
-   handle the new `regby_redeemed` notice (`e` = the merchant's own
-   `request_regby_code`, `deliver_to` = customer npub). Both tags are
+5. **Pairing tags.** Read `from` (merchant hex pubkey) on `regby_content` and
+   handle the new `regby_content_delivered` notice (`e` = the merchant's own
+   `request_regby_code`, `to` = customer hex pubkey). Both tags are
    plaintext on the relay.
 
 ## Size
