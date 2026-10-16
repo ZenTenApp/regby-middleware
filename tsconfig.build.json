@@ -1,4 +1,6 @@
 {
+  // Build only: keeps tests and fixtures out of dist/ and the image.
+  // `exclude` replaces the parent's list, so dist and node_modules are repeated.
   "extends": "./tsconfig.json",
   "exclude": ["dist", "node_modules", "src/**/*.test.ts", "src/**/*.fixture.ts"]
 }

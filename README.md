@@ -49,9 +49,6 @@ value as `REGBY_MIDDLEMAN_PUBKEY`. Set `REGBY_EXPECTED_PUBKEY` to have the
 broker check it. Use a separate key for local runs, or the local broker will
 answer production traffic on the shared relays.
 
-Codes are stored under `YYYY/MM/regby-YYYY-MM-DD.db` next to `REGBY_DB_PATH`
-(the working directory by default).
-
 ### With Docker
 
 ```bash

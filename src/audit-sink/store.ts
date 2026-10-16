@@ -2,7 +2,7 @@
  * The permanent audit history, in a managed Postgres the sink alone connects
  * to: the broker reaches it only through the sink's token-guarded intake, so
  * a compromised broker can append records but never read or delete them. It
- * holds full invoices and full pubkeys, so it is bounded in time
+ * holds full content and full pubkeys, so it is bounded in time
  * (`retainDays`) and size (`maxRows`).
  */
 import pg from 'pg';

@@ -107,6 +107,7 @@ export function parseAuditBatch(body: unknown): AuditRecord[] | null {
   if (!Array.isArray(records) || records.length === 0 || records.length > AUDIT_BATCH_MAX) {
     return null;
   }
+  // Widen from `any[]` so the type guard below narrows to AuditRecord[].
   const items: unknown[] = records;
   return items.every(isAuditRecord) ? items : null;
 }

@@ -13,18 +13,8 @@ The examples use a `defito://` payment request; plain text or empty content
 runs the same five hops (empty only pairs the peers). Judging the content is
 the recipient's job.
 
-- Intent rides the `["i", <intent>]` tag: `request_regby_code` / `regby_code` /
-  `request_regby_content` / `regby_content` / `regby_content_delivered`. A
-  failure has its own intent and empty content (see the error variant below).
-- Replies link to the request via `["e", <request-event-id>]` (the client
-  matches a reply to the request it published - no in-band id).
-- `["expiration", <unix>]` (NIP-40) = `created_at + REGBY_EVENT_EXPIRY_SECONDS`
-  (default 72 h less a minute) on every event - a relay-retention /
-  maintenance buffer only. **Code validity is 1 min, single-use**, and is
-  anchored to the merchant request event's `created_at` (not server
-  receive-time), so the POS and server count down from the same instant. The
-  merchant signed that event, so it already knows the origin - no timestamp is
-  echoed back.
+Rules (intents, failures, tags, code lifecycle, retention) live in
+[protocol.md](protocol.md); this page only shows the events.
 
 ## Hop 1 - merchant → middleman (`i: request_regby_code`)
 
@@ -161,24 +151,30 @@ Event:
 code it is showing. `to` is the customer's hex pubkey, in plaintext. An app
 that predates this intent drops the event as unknown.
 
-## Error variant - bad / expired code (own intent, replaces hop 4)
+## Error variant - refused code (own intent, replaces hop 4)
 
-A failure reply names the outcome in its intent and carries **empty**
-`content` (a raw `""`, not encrypted: empty content never is, in either
-direction) and no `from` tag. Content is opaque and may be
-empty on a success too, so the client reads the intent, never the content, to
-tell them apart.
+Same shape as hop 4, but the intent names the failure, `content` is a raw `""`
+(empty content is never encrypted) and there is no `from` tag:
 
-Event tags: `["p", <requester>]`, `["e", <request id>]`, `["i", <failure intent>]`,
-`["expiration", …]`, `["client","regby-middleware"]`. A code is in exactly one state at a time, set by its age
-from the merchant's request; each later state overrides the earlier, so a used
-code reads `expired` once its minute is over. The failure intent is one of:
-- `regby_code_already_redeemed` - already redeemed, still inside its 1-min validity. Answers a `request_regby_content`.
-  - This includes a redeem whose reply no relay accepted: the code is consumed before the reply is published (at-most-once), so a dropped reply burns it and the customer's retry lands here (or on `regby_code_expired` once the minute is over). Recovery is a re-mint at the POS; the server logs `Code consumed but its reply reached no relay`.
-- `regby_code_expired` - past the 1-min validity, used or not, under 1 h old. Answers a `request_regby_content`.
-- `regby_code_locked` - 1 h to 72 h old: the number is held back so it is never issued to another request before then. Answers a `request_regby_content`, and counts as a guess toward the blacklist.
-- `regby_code_not_found` - never minted, or more than 72 h old. Answers a `request_regby_content`, and counts as a guess.
-- `regby_code_busy` - mint-time store overflow. Answers a `request_regby_code`, to the merchant.
+```json
+{
+  "kind": 4,
+  "pubkey": "4014be77...ac0951",
+  "created_at": 1750579261,
+  "tags": [
+    ["p","c0c0...c0c0"],
+    ["e","a19a7a4f...0022222"],
+    ["i","regby_code_expired"],
+    ["expiration","1750838401"],
+    ["client","regby-middleware"]
+  ],
+  "content": "",
+  "id": "…", "sig": "…"
+}
+```
+
+Which failure intent applies, by the code's age: [protocol.md, Failures](protocol.md#failures).
+A refused mint looks the same with `i` = `regby_code_busy`, sent to the merchant.
 
 ## Notes
 
@@ -187,17 +183,7 @@ code reads `expired` once its minute is over. The failure intent is one of:
 - Correlation is the `["e", <request-event-id>]` reply tag.
 - The DM relays refuse writes without a `client` tag. The broker's events carry `["client","regby-middleware"]`; app events carry the app's own (omitted from the merchant and customer examples above).
 - Server subscription: `{ kinds:[4], "#p":[MID], "#i":["request_regby_code","request_regby_content"] }`.
-- Code validity = 1 min, anchored to the merchant request's `created_at` (skew-clamped). Single-use: the first redeem consumes it. A used code answers `regby_code_already_redeemed` inside its minute; then any code answers `regby_code_expired` until 1 h, `regby_code_locked` until 72 h, then `regby_code_not_found`. The number is not reissued for 72 h.
-- Relay retention = NIP-40 `expiration` = `created_at + REGBY_EVENT_EXPIRY_SECONDS` (default 72 h less a minute) on every event (maintenance buffer, unrelated to code validity).
-- **Active cleanup**: once a reply's expiration passes, the middleman publishes a NIP-09 `kind 5`
-  deletion referencing its own reply event ids (batched), since NIP-40 is advisory and not all relays honor
-  it. Example: `{ "kind":5, "tags":[["k","4"],["e","<reply-id>"],…], "content":"regby expired" }`. Only the
-  middleman's own events - inbound merchant/customer events are theirs to delete.
-- **Persistence**: the code store is SQLite (`node:sqlite`, base `REGBY_DB_PATH`), so codes survive a
-  restart. The deletion queue stays in-memory (covers replies from the current process; older ones
-  fall back to NIP-40 relay expiry).
-- **Daily rotation**: a new SQLite file is opened per UTC day (nested `YYYY/MM/regby-YYYY-MM-DD.db` from `REGBY_DB_PATH`),
-  switched at 00:00 UTC; old files are kept on disk. Only the current day's file is read/written, but
-  opening it copies in the codes from the last 72 h out of every earlier day file, so a code minted just before midnight
-  still works after the roll and no number is reissued within 72 h. Each row also stores `created_at`
-  (wall-clock mint time, the start of the 72 h reuse window).
+- **Deletion**: once a reply's expiration passes, the broker publishes a NIP-09 kind 5 for its own
+  reply ids, e.g. `{ "kind":5, "tags":[["k","4"],["e","<reply-id>"],…], "content":"regby expired" }`.
+  The dedicated DM relays reject kind 5, so there retention rests on the NIP-40 tag (see
+  [protocol.md, Relay housekeeping](protocol.md#relay-housekeeping)).

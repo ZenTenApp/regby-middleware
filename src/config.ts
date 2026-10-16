@@ -57,7 +57,7 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const SERVICE_NAME_RE = /^[a-z0-9-]+$/i;
 
 /**
- * The token and full invoices ride this connection, so plain http is allowed
+ * The token and full content ride this connection, so plain http is allowed
  * only to this machine: loopback, or a container beside the broker reached by
  * its service name (docker-compose.audit.yml).
  */
