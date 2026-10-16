@@ -7,8 +7,8 @@ services:
     env_file: .env
     environment:
       # Beats env_file: a stray REGBY_DB_PATH in .env can't move the store off
-      # the mount. See README "Docker".
+      # the mount. See docs/deployment.md.
       REGBY_DB_PATH: /data/regby.db
     volumes:
-      # Host folder, survives `down -v` / `volume prune`. See README "Docker".
+      # Host folder, survives `down -v` / `volume prune`. See docs/deployment.md.
       - ${REGBY_DATA_DIR:-./data}:/data

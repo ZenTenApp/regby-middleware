@@ -30,14 +30,3 @@ test('anything off-contract fails the whole batch', () => {
   }
 });
 
-test('a batch in the pre-content shape is mapped, not rejected, so a deploy loses nothing', () => {
-  const { content, reason, ...rest } = auditRecord({ event: 'redeem_refused', reason: 'expired', content: null });
-  const legacy = { ...rest, uri: content, detail: reason, validUntil: null, payloadHmac: null, payloadLength: null };
-  const refused = { ...rest, event: 'invalid_request', uri: null, detail: 'malformed', validUntil: null, payloadHmac: 'b'.repeat(64), payloadLength: 42 };
-  assert.deepEqual(parseAuditBatch({ records: [legacy, refused] }), [
-    { ...rest, content: null, reason: 'expired' },
-    { ...rest, event: 'invalid_request', content: null, reason: 'malformed' },
-  ]);
-  // Still validated after mapping: a legacy record with a bad field fails the batch.
-  assert.equal(parseAuditBatch({ records: [{ ...legacy, pubkey: 'nope' }] }), null);
-});

@@ -51,7 +51,7 @@ can say whether the reply reached a relay (`delivered`).
 | `blacklisted` | a code guesser, blocked for `REGBY_BLACKLIST_SECONDS` (default 24 h) | customer | **no reply** | typed code | - | `guessing` | null |
 | `merchant_notified` | after a `redeem`, the merchant was told their code is used up (`regby_content_delivered`, tagged `to` = customer). Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_content_delivered`, content = the code | redeemed code | - | - | true / false |
 
-The broker never refuses content for what it says (see README), so no event
+The broker never refuses content for what it says (see [protocol.md](protocol.md)), so no event
 records a refused payload. History written by a broker from before that
 change can still hold `invalid_request` (`reason` = `malformed`) and
 `blacklisted` (`reason` = `malicious`): a `defito://` payload that broker

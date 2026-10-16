@@ -29,22 +29,12 @@ export const AUDIT_EVENTS = [
 
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 
-/**
- * Events only a broker from before content became opaque sends. Accepted (see
- * `fromLegacyShape`) so records in flight across that deploy are not lost; the
- * current broker never emits them.
- */
-const LEGACY_EVENTS = ['invalid_request'] as const;
-
-/** What the sink stores: today's events, plus the legacy ones still in history. */
-export type StoredEvent = AuditEvent | (typeof LEGACY_EVENTS)[number];
-
 export interface AuditRecord {
   /** Random UUID; the sink ignores a repeat, so a retried batch can't double rows. */
   id: string;
   /** Broker clock, unix seconds. */
   ts: number;
-  event: StoredEvent;
+  event: AuditEvent;
   /** Full hex pubkey of the sender. */
   pubkey: string;
   /** Id of the inbound Nostr event this record answers. */
@@ -52,7 +42,7 @@ export interface AuditRecord {
   code: string | null;
   /** Full content, opaque; only on a served request (see header). */
   content: string | null;
-  /** Why a request was refused: `expired`, `redeemed`, `not-found`, `guessing`. */
+  /** Why a request was refused: `expired`, `redeemed`, `locked`, `not-found`, `guessing`. */
   reason: string | null;
   /** Whether the reply reached a relay; null when none was sent. */
   delivered: boolean | null;
@@ -92,7 +82,7 @@ const orNull = (check: Check): Check => (v) => v === null || check(v);
 const RECORD_FIELDS: Record<keyof AuditRecord, Check> = {
   id: matches(UUID_RE),
   ts: isUint,
-  event: (v) => typeof v === 'string' && ([...AUDIT_EVENTS, ...LEGACY_EVENTS] as readonly string[]).includes(v),
+  event: (v) => typeof v === 'string' && (AUDIT_EVENTS as readonly string[]).includes(v),
   pubkey: matches(HEX64_RE),
   requestEvent: matches(HEX64_RE),
   code: orNull(matches(REGBY_CODE_RE)),
@@ -102,21 +92,6 @@ const RECORD_FIELDS: Record<keyof AuditRecord, Check> = {
 };
 
 const FIELD_NAMES = Object.keys(RECORD_FIELDS) as (keyof AuditRecord)[];
-
-/**
- * A record in the shape the broker sent before content became opaque (`uri`,
- * `detail`, plus three fields it no longer has), mapped to today's shape;
- * anything else is returned as is. During a deploy the sink is replaced before
- * the broker, so the old broker's last batches arrive here, and a 400 would
- * drop them for good. Remove once no broker of that age can still be running.
- */
-function fromLegacyShape(value: unknown): unknown {
-  if (typeof value !== 'object' || value === null || !('uri' in value)) return value;
-  const { uri, detail, validUntil, payloadHmac, payloadLength, ...rest } = value as Record<string, unknown>;
-  const dropped = [validUntil, payloadHmac, payloadLength];
-  if (!dropped.every((v) => v === null || typeof v === 'number' || typeof v === 'string')) return value;
-  return { ...rest, content: uri, reason: detail };
-}
 
 function isAuditRecord(value: unknown): value is AuditRecord {
   if (typeof value !== 'object' || value === null) return false;
@@ -132,6 +107,6 @@ export function parseAuditBatch(body: unknown): AuditRecord[] | null {
   if (!Array.isArray(records) || records.length === 0 || records.length > AUDIT_BATCH_MAX) {
     return null;
   }
-  const current = records.map(fromLegacyShape);
-  return current.every(isAuditRecord) ? current : null;
+  const items: unknown[] = records;
+  return items.every(isAuditRecord) ? items : null;
 }
