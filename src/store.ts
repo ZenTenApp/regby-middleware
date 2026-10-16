@@ -1,8 +1,7 @@
 /**
- * SQLite-backed code store. Maps an 8-digit code to the merchant's content (a
- * payment-request URI, or empty) and who asked for it, persisted so codes
- * survive a server restart (the previous in-memory Map lost every code on
- * reboot - a restart used to make all codes unredeemable).
+ * SQLite-backed code store. Maps an 8-digit code to the merchant's opaque
+ * content (any text, empty included) and who asked for it, persisted so codes
+ * survive a server restart.
  *
  * Validity timestamps per row, both anchored to the merchant request's own
  * `created_at` (skew-clamped by the caller, passed in as `startedAt`):
@@ -61,14 +60,14 @@ export interface MintResult {
 
 /** Who asked for a code: the merchant, by signed pubkey, and their request event. */
 export interface CodeOrigin {
-  /** Hex pubkey that signed the `request_regby_code`, never the invoice's own claim. */
+  /** Hex pubkey that signed the `request_regby_code`, never anything claimed in the content. */
   merchantPubkey: string;
   requestEvent: string;
 }
 
 export type RedeemFailureReason = 'not-found' | 'locked' | 'expired' | 'redeemed';
 
-/** `origin` is null only for a code minted before origins were stored. */
+/** `origin` is null only for a row carried from a daily file older than the origin columns. */
 export type RedeemResult =
   | { ok: true; content: string; origin: CodeOrigin | null }
   | { ok: false; reason: RedeemFailureReason };
@@ -135,7 +134,7 @@ const DAY_SECONDS = 86_400;
 
 /**
  * A code number is never issued again within this long of its last issue, so a
- * stale code in a customer's hands can never open someone else's invoice.
+ * stale code in a customer's hands can never open someone else's content.
  */
 export const CODE_REUSE_SECONDS = 3 * DAY_SECONDS;
 
@@ -211,7 +210,7 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Mint a unique code for a URI, validity anchored to `startedAt`. Never a
+   * Mint a unique code for `content`, validity anchored to `startedAt`. Never a
    * number issued in the last 72 h: those rows still hold the primary key.
    * Returns null when the store is at capacity (codes issued in the last 72 h),
    * no free code was found, or the anchor is already past validity (all "try
@@ -273,7 +272,7 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Periodic hygiene: purge, then checkpoint so deleted invoices leave the
+   * Periodic hygiene: purge, then checkpoint so deleted content leaves the
    * `-wal` log too. Kept off the mint path - one fsync per sweep tick, not per
    * mint.
    */
@@ -283,7 +282,7 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Purge, then close (call on shutdown). Codes and their invoices survive the
+   * Purge, then close (call on shutdown). Codes and their content survive the
    * restart. Closing the last connection checkpoints the WAL.
    */
   close(): void {
@@ -293,9 +292,9 @@ export class CodeStore implements CodeStoreLike {
 
   /**
    * Copy the rows issued within the reuse window from another day's file, as they
-   * stand (invoice, expiry, redeemed state). Run when a new day's file opens,
+   * stand (content, expiry, redeemed state). Run when a new day's file opens,
    * so midnight neither frees those numbers for reuse nor cuts short a code
-   * still inside its minute. The source keeps its invoices until the caller
+   * still inside its minute. The source keeps its content until the caller
    * wipes it: `retire` on rotation, `scrubArchives` on startup.
    * Idempotent: rows already here are left alone.
    */
@@ -327,9 +326,9 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Wipe every invoice and origin, then close. For a file leaving service on day
+   * Wipe all content and origins, then close. For a file leaving service on day
    * rotation: its live codes were carried into the new day's file, and the
-   * archived file must not keep their URIs or who asked for them.
+   * archived file must not keep their contents or who asked for them.
    */
   retire(): void {
     this.db.exec(WIPE_SQL);
@@ -393,7 +392,7 @@ function dailyDbFiles(basePath: string): string[] {
 }
 
 /**
- * Wipe every invoice and origin left in an archived daily file. Rotation and the startup
+ * Wipe all content and origins left in an archived daily file. Rotation and the startup
  * carry clean the file they leave, but a server down across two or more
  * midnights never touched the older ones, and nothing else ever would.
  */
@@ -450,7 +449,7 @@ export class RotatingCodeStore implements CodeStoreLike {
     this.scrubArchives(dailyDbPath(this.basePath, bootAt));
   }
 
-  /** Startup only: after the carry, no file but today's may hold an invoice. */
+  /** Startup only: after the carry, no file but today's may hold any content. */
   private scrubArchives(today: string): void {
     for (const path of dailyDbFiles(this.basePath)) {
       if (path === today) continue;
@@ -494,7 +493,7 @@ export class RotatingCodeStore implements CodeStoreLike {
     const day = utcDayKey(this.now());
     if (day === this.currentDay) return;
     // Open (and carry into) the new file BEFORE retiring the old one: retire
-    // wipes every invoice, and a code still inside its minute must cross over.
+    // wipes all content, and a code still inside its minute must cross over.
     let next: CodeStore;
     try {
       next = this.openCurrent();

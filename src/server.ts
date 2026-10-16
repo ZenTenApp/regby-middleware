@@ -60,8 +60,6 @@ const REDEEM_FAILURE_INTENT: Record<RedeemFailureReason, FailureIntent> = {
  */
 const GUESS_REASONS: ReadonlySet<RedeemFailureReason> = new Set(['not-found', 'locked']);
 
-
-
 /** Collaborators a test can swap; production builds each from `Config`. */
 export interface BrokerDeps {
   transport: ReGBYTransport;
@@ -114,10 +112,8 @@ export class ReGBYBroker {
         logger.error('Event handling failed', { id: event.id.slice(0, 12), error: errorMessage(err) });
       });
     });
-    // No boot wipe: codes persist in SQLite across restarts, so prior reply
-    // events are NOT orphaned and must not be blanket-deleted. Expired replies
-    // are still cleaned by the deletion queue (purgeExpired) on the sweep timer.
-    // Periodic store/limiter/blacklist hygiene + NIP-09 deletion of our replies.
+    // Periodic store/limiter/blacklist hygiene + NIP-09 deletion of our expired
+    // replies. Codes persist across restarts, so earlier replies stay valid.
     this.sweepTimer = setInterval(() => {
       this.store.sweep();
       for (const l of [this.limiter, this.mintLimiter, this.redeemLimiter, this.redeemFails]) {

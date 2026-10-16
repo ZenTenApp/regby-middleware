@@ -1,9 +1,9 @@
-# --- build: compile TS → dist, then drop dev deps ---
+# --- build: compile TS (tests excluded) to dist, then drop dev deps ---
 FROM node:24-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY tsconfig.json ./
+COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 

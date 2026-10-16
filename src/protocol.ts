@@ -87,9 +87,10 @@ export const REPLY_INTENT = {
  * The intent of every failure reply, sent with empty content. `busy` answers a
  * `request_regby_code` (no free code to mint), the rest a
  * `request_regby_content`, one per state of the code (see `store.ts`): used
- * inside its minute, lapsed (used or not), held back from reuse, unknown. The app must know each one: an intent it does not
- * recognise never matches its pending request, so a new failure needs an app
- * release first. Pinned against the app by the parity tests.
+ * inside its minute, lapsed (used or not), held back from reuse, unknown. The
+ * app must know each one: an intent it does not recognise never matches its
+ * pending request, so a new failure needs an app release first. Pinned against
+ * the app's `utils/regby.ts` by the parity test in `protocol.test.ts`.
  */
 export const FAILURE_INTENT = {
   notFound: 'regby_code_not_found',

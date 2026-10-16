@@ -2,7 +2,7 @@
  * The permanent audit history, in a managed Postgres the sink alone connects
  * to: the broker reaches it only through the sink's token-guarded intake, so
  * a compromised broker can append records but never read or delete them. It
- * holds full invoices and full pubkeys, so it is bounded in time
+ * holds full content and full pubkeys, so it is bounded in time
  * (`retainDays`) and size (`maxRows`).
  */
 import pg from 'pg';
@@ -41,7 +41,7 @@ const COLUMNS: readonly Column[] = [
   { name: 'content', type: 'text', required: false, value: (r) => r.content,
     comment: 'Full content as sent (any text, empty included), only for served requests: code_issued, regby_busy, redeem.' },
   { name: 'reason', type: 'text', required: false, value: (r) => r.reason,
-    comment: 'Why the request was refused. redeem_refused: expired | redeemed | not-found. blacklisted: guessing (older history: malicious). invalid_request (older history): malformed. Null for the rest.' },
+    comment: 'Why the request was refused. redeem_refused: expired | redeemed | locked | not-found. blacklisted: guessing (older history: malicious). invalid_request (older history): malformed. Null for the rest.' },
   { name: 'delivered', type: 'boolean', required: false, value: (r) => r.delivered,
     comment: 'Did the reply reach at least one relay. false on redeem means the code was used up but the customer never got the content. Null when no reply was sent (blacklisted/guessing).' },
 ];

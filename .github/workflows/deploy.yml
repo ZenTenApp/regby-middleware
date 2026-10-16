@@ -1,7 +1,7 @@
 # Test, then deploy main to the server: knock the firewall open, SSH in,
 # fast-forward the checkout to the tested commit and rebuild with docker
 # compose. Which services start (broker alone, or broker + audit sink) is the
-# server's call, through COMPOSE_FILE in its .env (see README "Audit sink").
+# server's call, through COMPOSE_FILE in its .env (see docs/deployment.md).
 #
 # Secrets (Settings > Environments > production):
 #   DEPLOY_HOST          server IP or hostname
