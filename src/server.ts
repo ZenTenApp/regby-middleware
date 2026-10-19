@@ -8,7 +8,8 @@
  *                           (content = the code)
  * Content is opaque: never judged here, only carried (see `protocol.ts`).
  * A failure replies with its own `FAILURE_INTENT` and empty content. Every
- * reply links to the request via the `e` tag.
+ * reply links to the request via the `e` tag, and every reply about a code
+ * names it in `CODE_TAG`.
  */
 import type { Event } from 'nostr-tools';
 import type { Config } from './config.ts';
@@ -24,6 +25,7 @@ import { Blacklist } from './blacklist.ts';
 import { BoundedMap } from './bounded-map.ts';
 import { nowSeconds } from './time.ts';
 import {
+  CODE_TAG,
   CONTENT_DELIVERED_INTENT,
   EMPTY_CONTENT,
   extractIntent,
@@ -322,7 +324,8 @@ export class ReGBYBroker {
    * Reply, then record the request with whether the reply reached a relay: one
    * record per answered request (plus one per merchant notice), so a reply no
    * relay took keeps its content and code on record (for a redeem, the code is
-   * already burnt).
+   * already burnt). The code tag is derived from the audit fields, so reply and
+   * record agree on the code.
    */
   private async answer(
     target: ReplyTarget,
@@ -331,7 +334,8 @@ export class ReGBYBroker {
     fields: AuditFields,
     extraTags: readonly string[][] = [],
   ): Promise<boolean> {
-    const delivered = await this.transport.reply(target, intent, content, extraTags);
+    const tags = fields.code ? [[CODE_TAG, fields.code], ...extraTags] : extraTags;
+    const delivered = await this.transport.reply(target, intent, content, tags);
     this.audit(target, { ...fields, delivered });
     return delivered;
   }

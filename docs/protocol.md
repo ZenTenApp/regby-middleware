@@ -33,6 +33,9 @@ Every message is a Nostr **DM, kind 4**, with NIP-04 encrypted `content`.
   minute). Relay housekeeping only; it says nothing about code validity.
 - Every published event also carries `["client", "regby-middleware"]`: the DM
   relays reject writes without a `client` tag.
+- **Code** rides plaintext `["regby_code", <code>]` on every reply about one
+  (all but `regby_code_busy`, where none was minted); see
+  [Pairing and code tags are public](#pairing-and-code-tags-are-public).
 
 NIP-04 is required on this kind because it is what every client reading these
 relays opens a kind 4 with; a NIP-44 payload would simply never be seen.
@@ -45,10 +48,10 @@ signature, so intents and pairing tags are authenticated too.
 | direction | `i` tag | content (decrypted) | extra tags |
 | --- | --- | --- | --- |
 | merchant to broker | `request_regby_code` | any text, e.g. `defito://...` | |
-| broker to merchant | `regby_code` | the code, e.g. `42891337` | |
+| broker to merchant | `regby_code` | the code, e.g. `42891337` | `regby_code` |
 | customer to broker | `request_regby_content` | the code | |
-| broker to customer | `regby_content` | the merchant's text | `from` = merchant hex pubkey |
-| broker to merchant | `regby_content_delivered` | the code | `to` = customer hex pubkey; `e` = the merchant's original request |
+| broker to customer | `regby_content` | the merchant's text | `regby_code`; `from` = merchant hex pubkey |
+| broker to merchant | `regby_content_delivered` | the code | `regby_code`; `to` = customer hex pubkey; `e` = the merchant's original request |
 
 ### Failures
 
@@ -68,12 +71,17 @@ first**, never the content.
 A client that does not recognise an intent never matches it to its pending
 request. **A new intent therefore needs an app release first.**
 
-### Pairing tags are public
+### Pairing and code tags are public
 
 `from` and `to` are plaintext hex pubkeys, like `p`. Anyone reading the relay
 sees which merchant and customer met. The merchant key is the one that signed
 the request, not anything claimed inside the content. A refused redeem sends
 neither tag.
+
+`regby_code` is plaintext too. Anyone watching the relay sees a live code on
+the `regby_code` reply and can redeem it before the customer does, inside its
+minute. The content then goes to them, and the merchant's
+`regby_content_delivered` names their pubkey in `to`. Accepted trade-off.
 
 `regby_content_delivered` is sent whether or not the customer's reply reached
 a relay: the code is used up either way, so "delivered" means released by the
