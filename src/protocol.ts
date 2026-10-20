@@ -123,17 +123,18 @@ export type OutboundIntent =
  * Plaintext tags naming the counterparty by hex pubkey (as `p` does), so each
  * side learns who the server paired them with: `from` (the merchant) on the
  * customer's `regby_content`, `to` (the customer) on the merchant's
- * `regby_content_delivered`. Unlike the content they are NOT encrypted: anyone
- * reading the relay sees which merchant and customer met. Accepted product
- * trade-off.
+ * `regby_content_delivered`. Unlike the content they are NOT encrypted; they
+ * stay private only because the DM relays serve a kind 4 to its author and
+ * recipient alone (docs/protocol.md, "Read access").
  */
 export const FROM_TAG = 'from';
 export const TO_TAG = 'to';
 
 /**
  * Plaintext tag naming the code on every reply about one (all but
- * `regby_code_busy`, where none was minted). NOT encrypted: a relay watcher can
- * race the customer to redeem a live code. Accepted product trade-off.
+ * `regby_code_busy`, where none was minted). NOT encrypted: safe only on relays
+ * that serve a kind 4 to its author and recipient alone. On a public relay any
+ * subscriber could race the customer to a live code.
  */
 export const CODE_TAG = 'regby_code';
 

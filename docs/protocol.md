@@ -35,7 +35,7 @@ Every message is a Nostr **DM, kind 4**, with NIP-04 encrypted `content`.
   relays reject writes without a `client` tag.
 - **Code** rides plaintext `["regby_code", <code>]` on every reply about one
   (all but `regby_code_busy`, where none was minted); see
-  [Pairing and code tags are public](#pairing-and-code-tags-are-public).
+  [Pairing and code tags are plaintext](#pairing-and-code-tags-are-plaintext).
 
 NIP-04 is required on this kind because it is what every client reading these
 relays opens a kind 4 with; a NIP-44 payload would simply never be seen.
@@ -71,17 +71,27 @@ first**, never the content.
 A client that does not recognise an intent never matches it to its pending
 request. **A new intent therefore needs an app release first.**
 
-### Pairing and code tags are public
+### Pairing and code tags are plaintext
 
-`from` and `to` are plaintext hex pubkeys, like `p`. Anyone reading the relay
-sees which merchant and customer met. The merchant key is the one that signed
-the request, not anything claimed inside the content. A refused redeem sends
-neither tag.
+`from` and `to` are plaintext hex pubkeys, like `p`. The merchant key is the
+one that signed the request, not anything claimed inside the content. A
+refused redeem sends neither tag. `regby_code` is plaintext too.
 
-`regby_code` is plaintext too. Anyone watching the relay sees a live code on
-the `regby_code` reply and can redeem it before the customer does, inside its
-minute. The content then goes to them, and the merchant's
-`regby_content_delivered` names their pubkey in `to`. Accepted trade-off.
+Plaintext is not public on the dedicated relays: they serve a kind 4 only to
+its author and its `p` recipient (see [Read access](#read-access)). So a
+reply's tags, the live code included, reach the broker and the one peer the
+reply is addressed to, who already holds the code. Nobody else can read a
+fresh code off the mint reply and race the customer to it, and nobody else
+learns whether a typed code was not found, used or locked.
+
+Who can still read them:
+
+- **The relay operators.** The same operator runs the broker, which holds the
+  plaintext content anyway.
+- **Anyone, on a relay without that read rule.** Pointing `REGBY_RELAYS` at a
+  public relay publishes every live code to its subscribers, and the first
+  reader to redeem gets the content. The broker must only ever use relays
+  with the read rule below.
 
 `regby_content_delivered` is sent whether or not the customer's reply reached
 a relay: the code is used up either way, so "delivered" means released by the
@@ -175,6 +185,26 @@ AUTH and a `client` tag, cap NIP-40 expiration at 72 h and cap the
 **encrypted** content at 4 KB. NIP-04 adds about a third, so plaintext of
 roughly 3000 ASCII characters already fails at the relay even though the
 broker accepts 4096.
+
+#### Read access
+
+These relays serve a kind 4 only to its author and its `p` recipient, after
+AUTH. The plaintext tags above are private because of this rule alone.
+
+Probed 2026-10-20 with throwaway keys (author A, recipient B, stranger C, all
+AUTHed) on a kind 4 from A to B carrying a `regby_code` tag:
+
+| read | dm1.zentext.me | dm2.nostr.box |
+| --- | --- | --- |
+| stored, by A or B | served | served |
+| stored, by C, filtered by author or by exact event id | nothing | nothing |
+| live subscription, B | received | received |
+| live subscription, C, by author or on all kind 4 | nothing | nothing |
+| without AUTH | refused or empty | refused or empty |
+
+C also saw none of the staging or production brokers' replies. `dm3.npub.cx`
+did not resolve at the time and is unverified. Re-run the probe before adding
+or changing a relay.
 
 ## Safeguards
 
