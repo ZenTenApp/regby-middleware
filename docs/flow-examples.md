@@ -58,7 +58,8 @@ Event:
     ["e","a19a7a4f...0011111"],
     ["i","regby_code"],
     ["expiration","1750838341"],
-    ["client","regby-middleware"]
+    ["client","regby-middleware"],
+    ["regby_code","42891337"]
   ],
   "content": "AgQ1mP9t...==",
   "id": "…", "sig": "…"
@@ -110,6 +111,7 @@ Event:
     ["i","regby_content"],
     ["expiration","1750838401"],
     ["client","regby-middleware"],
+    ["regby_code","42891337"],
     ["from","a1a1...a1a1"]
   ],
   "content": "AgC2hW8q...==",
@@ -141,6 +143,7 @@ Event:
     ["i","regby_content_delivered"],
     ["expiration","1750838401"],
     ["client","regby-middleware"],
+    ["regby_code","42891337"],
     ["to","c0c0...c0c0"]
   ],
   "content": "AgD9xK2m...==",
@@ -166,7 +169,8 @@ Same shape as hop 4, but the intent names the failure, `content` is a raw `""`
     ["e","a19a7a4f...0022222"],
     ["i","regby_code_expired"],
     ["expiration","1750838401"],
-    ["client","regby-middleware"]
+    ["client","regby-middleware"],
+    ["regby_code","42891337"]
   ],
   "content": "",
   "id": "…", "sig": "…"
@@ -174,7 +178,8 @@ Same shape as hop 4, but the intent names the failure, `content` is a raw `""`
 ```
 
 Which failure intent applies, by the code's age: [protocol.md, Failures](protocol.md#failures).
-A refused mint looks the same with `i` = `regby_code_busy`, sent to the merchant.
+A refused mint looks the same with `i` = `regby_code_busy`, sent to the merchant,
+without a `regby_code` tag.
 
 ## Notes
 

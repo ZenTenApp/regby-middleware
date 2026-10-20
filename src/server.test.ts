@@ -6,7 +6,7 @@ import { CodeStore } from './store.ts';
 import type { Config } from './config.ts';
 import type { ReGBYTransport, ReplyTarget } from './nostr.ts';
 import type { AuditEntry, AuditSink } from './audit-sender.ts';
-import { FROM_TAG, TO_TAG, type OutboundIntent } from './protocol.ts';
+import { CODE_TAG, FROM_TAG, TO_TAG, type OutboundIntent } from './protocol.ts';
 
 const BROKER = 'f'.repeat(64);
 const MERCHANT = 'a'.repeat(64);
@@ -145,14 +145,14 @@ test('a redeem names the merchant to the customer and notifies the merchant', as
       target: { recipientPubkey: CUSTOMER, requestEventId: '3'.repeat(64) },
       intent: 'regby_content',
       content: INVOICE,
-      extraTags: [[FROM_TAG, MERCHANT]],
+      extraTags: [[CODE_TAG, code], [FROM_TAG, MERCHANT]],
     });
     // Event 5: the code back to the merchant, on their own request's thread.
     assert.deepEqual(toMerchant, {
       target: { recipientPubkey: MERCHANT, requestEventId: '1'.repeat(64) },
       intent: 'regby_content_delivered',
       content: code,
-      extraTags: [[TO_TAG, CUSTOMER]],
+      extraTags: [[CODE_TAG, code], [TO_TAG, CUSTOMER]],
     });
     assert.deepEqual(
       audit.entries.map((e) => [e.event, e.pubkey, e.delivered]),
@@ -179,7 +179,7 @@ test('the merchant is notified even when the customer\'s reply reached no relay'
   });
 });
 
-test('a refused redeem notifies no one and tags no merchant', async () => {
+test('a refused redeem notifies no one and tags only the code', async () => {
   await withBroker(async (transport) => {
     const code = await mint(transport);
     await transport.inbound('3', CUSTOMER, 'request_regby_content', code);
@@ -187,7 +187,7 @@ test('a refused redeem notifies no one and tags no merchant', async () => {
     const refusal = transport.sent.at(-1);
     assert.equal(refusal?.intent, 'regby_code_already_redeemed');
     assert.equal(refusal?.content, '');
-    assert.deepEqual(refusal?.extraTags, []);
+    assert.deepEqual(refusal?.extraTags, [[CODE_TAG, code]]);
     assert.equal(transport.sent.filter((r) => r.intent === 'regby_content_delivered').length, 1);
   });
 });
@@ -199,9 +199,9 @@ test('empty content runs the same five events, pairing the peers', async () => {
     assert.deepEqual(
       transport.sent.map((r) => [r.intent, r.content, r.extraTags]),
       [
-        ['regby_code', code, []],
-        ['regby_content', '', [[FROM_TAG, MERCHANT]]],
-        ['regby_content_delivered', code, [[TO_TAG, CUSTOMER]]],
+        ['regby_code', code, [[CODE_TAG, code]]],
+        ['regby_content', '', [[CODE_TAG, code], [FROM_TAG, MERCHANT]]],
+        ['regby_content_delivered', code, [[CODE_TAG, code], [TO_TAG, CUSTOMER]]],
       ],
     );
     assert.deepEqual(
@@ -216,7 +216,7 @@ test('an unknown code is refused as not found, with empty content', async () => 
     await transport.inbound('3', CUSTOMER, 'request_regby_content', '12345678');
     assert.deepEqual(
       transport.sent.map((r) => [r.intent, r.content, r.extraTags]),
-      [['regby_code_not_found', '', []]],
+      [['regby_code_not_found', '', [[CODE_TAG, '12345678']]]],
     );
   });
 });
@@ -234,7 +234,7 @@ test('a locked code is refused with empty content and counts as a guess', async 
     }
     const refusals = transport.sent.slice(1);
     assert.equal(refusals.length, CONFIG.redeemFailMax);
-    for (const r of refusals) assert.deepEqual([r.intent, r.content, r.extraTags], ['regby_code_locked', '', []]);
+    for (const r of refusals) assert.deepEqual([r.intent, r.content, r.extraTags], ['regby_code_locked', '', [[CODE_TAG, code]]]);
     assert.equal(audit.entries.at(-1)?.event, 'blacklisted');
   }, clock);
 });

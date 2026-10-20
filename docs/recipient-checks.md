@@ -71,6 +71,9 @@ These did not exist when the middleware judged content.
    handle the new `regby_content_delivered` notice (`e` = the merchant's own
    `request_regby_code`, `to` = customer hex pubkey). Both tags are
    plaintext on the relay.
+6. **Code tag.** Replies about a code carry it in plaintext
+   ([protocol.md](protocol.md#pairing-and-code-tags-are-plaintext)). The app can
+   match on it, but `e` stays the reply linkage.
 
 ## Size
 

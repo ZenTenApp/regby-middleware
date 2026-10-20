@@ -26,9 +26,10 @@
  *     tag. Empty content alone means nothing: a success may carry empty
  *     content too, so the client reads the intent first.
  *   - relay retention is bounded by NIP-40 `['expiration', unixSec]`.
+ *   - every reply about a code also carries it in plaintext (`CODE_TAG`).
  *
  * Tags are covered by the event signature, so intent/linkage are authenticated.
- * Only the content/code lives in the ciphertext.
+ * Only the content is private: the code is in the ciphertext and in `CODE_TAG`.
  */
 
 /** Encrypted DM kind: NIP-04 envelope and NIP-04 ciphertext, which is what
@@ -122,12 +123,20 @@ export type OutboundIntent =
  * Plaintext tags naming the counterparty by hex pubkey (as `p` does), so each
  * side learns who the server paired them with: `from` (the merchant) on the
  * customer's `regby_content`, `to` (the customer) on the merchant's
- * `regby_content_delivered`. Unlike the content they are NOT encrypted: anyone
- * reading the relay sees which merchant and customer met. Accepted product
- * trade-off.
+ * `regby_content_delivered`. Unlike the content they are NOT encrypted; they
+ * stay private only because the DM relays serve a kind 4 to its author and
+ * recipient alone (docs/protocol.md, "Read access").
  */
 export const FROM_TAG = 'from';
 export const TO_TAG = 'to';
+
+/**
+ * Plaintext tag naming the code on every reply about one (all but
+ * `regby_code_busy`, where none was minted). NOT encrypted: safe only on relays
+ * that serve a kind 4 to its author and recipient alone. On a public relay any
+ * subscriber could race the customer to a live code.
+ */
+export const CODE_TAG = 'regby_code';
 
 /** A validated inbound message: a merchant code request, or a customer redeem. */
 export type InboundMessage =
