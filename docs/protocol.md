@@ -34,7 +34,10 @@ Every message is a Nostr **DM, kind 4**, with NIP-04 encrypted `content`.
 - Every published event also carries `["client", "regby-middleware"]`: the DM
   relays reject writes without a `client` tag.
 - **Code** rides plaintext `["regby_code", <code>]` on every reply about one
-  (all but `regby_code_busy`, where none was minted); see
+  (all but `regby_code_busy`, where none was minted). It is optional for
+  clients: a request needs no such tag, the broker ignores one if sent (the
+  code is read from the content only), and a client may ignore it on replies,
+  since `e` stays the linkage; see
   [Pairing and code tags are plaintext](#pairing-and-code-tags-are-plaintext).
 
 NIP-04 is required on this kind because it is what every client reading these

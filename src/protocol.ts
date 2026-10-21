@@ -132,7 +132,8 @@ export const TO_TAG = 'to';
 
 /**
  * Plaintext tag naming the code on every reply about one (all but
- * `regby_code_busy`, where none was minted). NOT encrypted: safe only on relays
+ * `regby_code_busy`, where none was minted). Outbound only: never read from a
+ * request, so clients may omit or ignore it. NOT encrypted: safe only on relays
  * that serve a kind 4 to its author and recipient alone. On a public relay any
  * subscriber could race the customer to a live code.
  */

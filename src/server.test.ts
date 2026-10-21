@@ -53,7 +53,13 @@ class FakeTransport implements ReGBYTransport {
   close(): void {}
 
   /** Deliver an inbound event and let the broker finish handling it. */
-  async inbound(id: string, pubkey: string, intent: string, content: string): Promise<void> {
+  async inbound(
+    id: string,
+    pubkey: string,
+    intent: string,
+    content: string,
+    extraTags: readonly string[][] = [],
+  ): Promise<void> {
     assert.ok(this.onEvent, 'broker not started');
     this.onEvent({
       id: id.repeat(64).slice(0, 64),
@@ -63,6 +69,7 @@ class FakeTransport implements ReGBYTransport {
       tags: [
         ['p', BROKER],
         ['i', intent],
+        ...extraTags,
       ],
       content,
       sig: '',
@@ -162,6 +169,21 @@ test('a redeem names the merchant to the customer and notifies the merchant', as
         ['merchant_notified', MERCHANT, true],
       ],
     );
+  });
+});
+
+test('requests need no code tag, and one a client sends is ignored', async () => {
+  await withBroker(async (transport) => {
+    // A stray tag on the mint changes nothing: a code is still issued.
+    await transport.inbound('1', MERCHANT, 'request_regby_code', INVOICE, [[CODE_TAG, '00000000']]);
+    const code = transport.sent.at(-1)?.content;
+    assert.ok(code && /^\d{8}$/.test(code), 'no code issued');
+    // The redeem names the real code only in its content; a tag naming
+    // another code must neither be redeemed nor block the real one.
+    await transport.inbound('3', CUSTOMER, 'request_regby_content', code, [[CODE_TAG, '12345678']]);
+    const reply = transport.sent.find((s) => s.intent === 'regby_content');
+    assert.equal(reply?.content, INVOICE);
+    assert.deepEqual(reply?.extraTags, [[CODE_TAG, code], [FROM_TAG, MERCHANT]]);
   });
 });
 
