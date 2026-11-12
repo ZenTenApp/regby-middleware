@@ -41,17 +41,26 @@ The usual payload is a `defito://` payment request.
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant M as Merchant
     participant B as Broker
     participant C as Customer
-    M->>B: 1 request_regby_code (text)
-    B->>M: 2 regby_code (code)
+    rect rgba(59, 130, 246, 0.15)
+    Note over M,B: Mint
+    M->>B: request_regby_code (text)
+    B->>M: regby_code (code)
+    end
     Note over M,C: the merchant shows the code, the customer types it
-    C->>B: 3 request_regby_content (code)
-    B->>C: 4 regby_content (text, from = merchant)
-    B->>M: 5 regby_content_delivered (to = customer)
-    Note over M,C: match, both sides know each other
-    C-->>M: 6 direct message tagged regby_code (optional, not via broker)
+    rect rgba(16, 185, 129, 0.15)
+    Note over B,C: Redeem
+    C->>B: request_regby_content (code)
+    B->>C: regby_content (text, from = merchant)
+    B->>M: regby_content_delivered (to = customer)
+    end
+    rect rgba(245, 158, 11, 0.15)
+    Note over M,C: After the match: direct, the broker never sees it
+    C-->>M: message tagged regby_code (optional)
+    end
 ```
 
 Events 1 to 5 are the protocol: they go through the broker and the broker

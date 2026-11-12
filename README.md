@@ -1,32 +1,58 @@
 # regby-middleware
 
-Nostr broker for **ReGBY**: BLIK-style 8-digit codes for the zenten-pay
+Nostr broker for **ReGBY**: BLIK-style 8-digit codes for the ZenTenPay
 wallet.
 
 A merchant sends the broker any text (typically a `defito://` payment
 request) in an encrypted Nostr DM and gets back an 8-digit code. The customer
 types the code into their wallet, which sends it to the broker and receives
-the merchant's text. The broker then tells each side who the other was. Codes
-live one minute and work once.
+the merchant's text. The broker then tells each side who the other was.
 
-```
-merchant POS                    broker                      customer wallet
-     │ request_regby_code ──────▶ │                                │
-     │ ◀──────────── regby_code   │                                │
-     │      (shows 42891337)      │ ◀──── request_regby_content    │
-     │                            │ ────── regby_content + from ──▶│
-     │ ◀── regby_content_delivered + to                            │
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as Merchant
+    participant B as Broker
+    participant C as Customer
+    rect rgba(59, 130, 246, 0.15)
+    Note over M,B: Mint
+    M->>B: request_regby_code (text)
+    B->>M: regby_code (code)
+    end
+    Note over M,C: the merchant shows the code, the customer types it
+    rect rgba(16, 185, 129, 0.15)
+    Note over B,C: Redeem
+    C->>B: request_regby_content (code)
+    B->>C: regby_content (text, from = merchant)
+    B->>M: regby_content_delivered (to = customer)
+    end
+    rect rgba(245, 158, 11, 0.15)
+    Note over M,C: After the match: direct, the broker never sees it
+    C-->>M: message tagged regby_code (optional)
+    end
 ```
 
-Every hop is a NIP-04 encrypted kind 4 DM on dedicated relays. The broker
-holds **no funds and no wallet keys**, only its own Nostr key, and never
-interprets the content it carries: validating it is the recipient's job.
+Events 1 to 5 go through the broker. Event 6 does not: after the match the
+two users message each other directly, and the customer's client tags its
+message (in the payment case, the `defifrom://` confirmation) with the code,
+so the merchant can tell it apart from a stranger's. Details:
+[docs/spec.md, After the match](docs/spec.md#after-the-match).
+
+A code works once, within one minute of the merchant's request. After that it
+answers `regby_code_expired` until it is an hour old, then `regby_code_locked`
+until 72 h, and only then can the number be issued again.
+
+Every message is a NIP-04 encrypted kind 4 DM on dedicated DM relays that
+serve a DM only to its author and its recipient
+([Read access](docs/protocol.md#read-access)). The broker holds **no funds and
+no wallet keys**, only its own Nostr key, and never interprets the content it
+carries: validating it is the recipient's job.
 
 ## Documentation
 
 | doc | for |
 | --- | --- |
-| [docs/spec.md](docs/spec.md) | Public protocol spec: events 1 to 5, failures, and the client recommendations after the match (event 6) |
+| [docs/spec.md](docs/spec.md) | Public protocol spec, for client implementers: events 1 to 5, failures, event 6 and match records |
 | [docs/protocol.md](docs/protocol.md) | Wire format, intents, failure states, code lifecycle, safeguards |
 | [docs/flow-examples.md](docs/flow-examples.md) | Every event of a full exchange, tag by tag |
 | [docs/configuration.md](docs/configuration.md) | Every environment variable, for the broker and the audit sink |
@@ -49,6 +75,10 @@ The boot log prints the broker's `pubkey`: the app must hardcode the same
 value as `REGBY_MIDDLEMAN_PUBKEY`. Set `REGBY_EXPECTED_PUBKEY` to have the
 broker check it. Use a separate key for local runs, or the local broker will
 answer production traffic on the shared relays.
+
+`REGBY_RELAYS` must only list relays with that read rule. Codes ride in
+plaintext tags, so on a public relay any reader can see a live code and redeem
+it before the customer does.
 
 ### With Docker
 
@@ -99,3 +129,4 @@ npm run dev:audit-sink    # in a second terminal
 | `src/audit-sender.ts` | Broker side: bounded queue, batched POST, backoff |
 | `src/audit-sink/` | Audit service: HTTP intake, Postgres history, retention |
 | `src/logger.ts`, `src/process.ts`, `src/time.ts` | JSON logging, process lifecycle, clocks |
+| `src/**/*.test.ts`, `src/audit.fixture.ts` | Tests, next to the code they cover; a shared audit record fixture |
