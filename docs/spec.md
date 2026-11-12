@@ -39,6 +39,21 @@ The usual payload is a `defito://` payment request.
    confirmation, tagged with the code so the merchant can recognise the
    sender. See [Event 6](#event-6).
 
+```mermaid
+sequenceDiagram
+    participant M as Merchant
+    participant B as Broker
+    participant C as Customer
+    M->>B: 1 request_regby_code (text)
+    B->>M: 2 regby_code (code)
+    Note over M,C: the merchant shows the code, the customer types it
+    C->>B: 3 request_regby_content (code)
+    B->>C: 4 regby_content (text, from = merchant)
+    B->>M: 5 regby_content_delivered (to = customer)
+    Note over M,C: match, both sides know each other
+    C-->>M: 6 direct message tagged regby_code (optional, not via broker)
+```
+
 Events 1 to 5 are the protocol: they go through the broker and the broker
 enforces them. Event 6 is a message between the two users that ReGBY only
 tags; the broker never sees it.
