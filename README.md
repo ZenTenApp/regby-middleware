@@ -1,6 +1,6 @@
 # regby-middleware
 
-Nostr broker for **ReGBY**: BLIK-style 8-digit codes for the ZenTenPay
+Nostr broker for **ReGBY**: one-time 8-digit codes for the ZenTenPay
 wallet.
 
 A merchant sends the broker any text (typically a `defito://` payment

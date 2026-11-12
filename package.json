@@ -2,7 +2,7 @@
   "name": "regby-middleware",
   "version": "0.1.0",
   "private": true,
-  "description": "Nostr middleman broker for ReGBY: BLIK-style 8-digit codes that carry opaque content between two peers over NIP-04 encrypted DMs.",
+  "description": "Nostr middleman broker for ReGBY: one-time 8-digit codes that carry opaque content between two peers over NIP-04 encrypted DMs.",
   "type": "module",
   "engines": {
     "node": ">=22.5"
