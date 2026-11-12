@@ -26,6 +26,7 @@ interprets the content it carries: validating it is the recipient's job.
 
 | doc | for |
 | --- | --- |
+| [docs/spec.md](docs/spec.md) | Public protocol spec: events 1 to 5, failures, and the client recommendations after the match (event 6) |
 | [docs/protocol.md](docs/protocol.md) | Wire format, intents, failure states, code lifecycle, safeguards |
 | [docs/flow-examples.md](docs/flow-examples.md) | Every event of a full exchange, tag by tag |
 | [docs/configuration.md](docs/configuration.md) | Every environment variable, for the broker and the audit sink |

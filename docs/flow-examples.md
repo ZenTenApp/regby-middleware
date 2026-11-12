@@ -84,12 +84,15 @@ Event:
   "tags": [
     ["p","4014be77...ac0951"],
     ["i","request_regby_content"],
-    ["expiration","1750838400"]
+    ["expiration","1750838400"],
+    ["regby_code","42891337"]
   ],
   "content": "AgZ7nR4s...==",
   "sig": "…"
 }
 ```
+`regby_code` is optional: both apps send it, and the server ignores it and
+reads the code from the content only.
 Server: `store.redeem("42891337")` → found + unexpired → returns the content and the merchant who asked for it, and **consumes** the code: it stamps `redeemed_at`, so a later redeem inside the code's minute gets `regby_code_already_redeemed`, and after it the code's age decides (see the error variant). The row (content included) stays 72 h for debugging, then is deleted.
 
 ## Hop 4 - middleman → customer (`i: regby_content`)
@@ -153,6 +156,14 @@ Event:
 `e` is the merchant's own hop 1 event, so the POS can match the notice to the
 code it is showing. `to` is the customer's hex pubkey, in plaintext. An app
 that predates this intent drops the event as unknown.
+
+## After hop 5 - customer → merchant, directly (recommended)
+
+The server's part ends here. The customer's next DM to the merchant (in the
+payment case, the `defifrom://` confirmation) goes straight to the merchant
+and should carry `["regby_code","42891337"]`, so the merchant can match it to
+the customer named in hop 5's `to`. Rules and an example:
+[spec.md, Event 6](spec.md#event-6).
 
 ## Error variant - refused code (own intent, replaces hop 4)
 
