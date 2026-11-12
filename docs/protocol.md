@@ -10,9 +10,13 @@ who received it (`to`).
 A `defifrom://` payment confirmation never passes through here. It goes
 straight to the npub named in the invoice it answers. The broker exists to fit
 an invoice into eight digits a customer can type, and nobody types a
-confirmation.
+confirmation. Clients should still tag that confirmation with the code it
+followed (event 6), so the merchant can recognise the customer it was paired
+with: [spec.md, After the match](spec.md#after-the-match). The
+broker plays no part in it.
 
 Full event examples for every hop: [flow-examples.md](flow-examples.md).
+Public spec, for client implementers: [spec.md](spec.md).
 
 ## Wire format
 
