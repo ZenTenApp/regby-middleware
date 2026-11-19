@@ -36,9 +36,9 @@ The usual payload is a `defito://` payment request.
    merchant.
 5. Broker to merchant: `regby_content_delivered`. Content is the text; `to`
    names the customer. Every other customer who sends event 3 while the code
-   is valid gets `regby_conflict` instead of event 4, and the merchant gets a
-   `regby_conflict` naming them. Both sides MUST show it as a warning, and the
-   exchange starts over with a new code; see
+   is valid gets `regby_code_already_redeemed` instead of event 4, and the
+   merchant gets a `regby_conflict` naming them. The merchant MUST show it as
+   a warning, and the exchange starts over with a new code; see
    [Several customers](#several-customers).
 6. *Optional.* Customer to merchant, directly: the customer's first message to
    the merchant after the match, for example a `defifrom://` payment
@@ -62,7 +62,7 @@ sequenceDiagram
     C->>B: request_regby_content (code tag)
     B->>C: regby_content (text, from = merchant)
     B->>M: regby_content_delivered (text, to = customer)
-    Note over M,C: regby_conflict to each other customer who sends the code in time, and to the merchant naming them
+    Note over M,C: regby_code_already_redeemed to each other customer who sends the code in time, regby_conflict to the merchant naming them
     end
     rect rgba(245, 158, 11, 0.15)
     Note over M,C: After the match: direct, the broker never sees it
@@ -100,9 +100,9 @@ ReGBY-specific tags:
 
 | tag | value | on |
 | --- | --- | --- |
-| `regby_code` | the code | events 2, 3, 4 and 5, both `regby_conflict`s, and every failure except `regby_code_busy`. SHOULD on event 6. |
+| `regby_code` | the code | events 2, 3, 4 and 5, `regby_conflict`, and every failure except `regby_code_busy`. SHOULD on event 6. |
 | `from` | merchant pubkey | event 4 |
-| `to` | customer pubkey | event 5 and the merchant's `regby_conflict` |
+| `to` | customer pubkey | event 5 and `regby_conflict` |
 
 Pubkeys are 32-byte lowercase hex. All tags are plaintext; see
 [Relays](#relays).
@@ -121,13 +121,13 @@ signature and MUST NOT treat a successful decrypt as proof of who sent it.
 | 5 | `regby_content_delivered` | broker to merchant | text, exactly as received in event 4 |
 | 5, conflict | `regby_conflict` | broker to merchant | the conflict warning |
 
-Failures replace event 2 or event 4. Their content is `""`, except
-`regby_conflict`, and they carry no `from` or `to` tag.
+Failures replace event 2 or event 4. Their content is `""`, and they carry
+no `from` or `to` tag.
 
 | intent | replaces | meaning |
 | --- | --- | --- |
 | `regby_code_busy` | event 2 | No code available. No `regby_code` tag. |
-| `regby_conflict` | event 4 | Code already redeemed by another pubkey, still inside its first minute. Content is the conflict warning. |
+| `regby_code_already_redeemed` | event 4 | Code already redeemed by another pubkey, still inside its first minute. |
 | `regby_code_expired` | event 4 | Code between 1 minute and 1 hour old, used or not. |
 | `regby_code_locked` | event 4 | Code between 1 hour and 72 hours old. |
 | `regby_code_not_found` | event 4 | Code never issued, or over 72 hours old. |
@@ -237,8 +237,9 @@ Event 5, broker to merchant:
 ```
 
 A conflict, broker to merchant, for a second customer who typed the code
-after the first one got it. The refused customer gets the same intent and
-content in place of event 4, with `e` naming their event 3 and no `to`:
+after the first one got it. That customer gets `regby_code_already_redeemed`
+in place of event 4, a plain failure like the one below. The merchant's
+notice:
 
 ```json
 {
@@ -286,7 +287,7 @@ that value to its own clock within a small skew.
 | --- | --- |
 | under 1 minute, not redeemed | event 4, then event 5 |
 | under 1 minute, redeemed by this pubkey | event 4 again, and no further event 5 |
-| under 1 minute, redeemed by another pubkey | `regby_conflict`, then a `regby_conflict` to the merchant if this pubkey has not sent the code before |
+| under 1 minute, redeemed by another pubkey | `regby_code_already_redeemed`, then a `regby_conflict` to the merchant if this pubkey has not sent the code before |
 | 1 minute to 1 hour | `regby_code_expired` |
 | 1 hour to 72 hours | `regby_code_locked` |
 | over 72 hours, or never issued | `regby_code_not_found` |
@@ -303,7 +304,7 @@ that value to its own clock within a small skew.
 A code shown on a screen can reach more than one customer. Only the first one
 to send event 3 gets event 4; the merchant hears about all of them.
 
-A conflict is a security signal, not a routine error. Either side of it may be
+A conflict is a security signal, not a routine error. Either customer may be
 the victim: whoever was first may have read the code off the merchant's screen
 and beaten the real customer to it, who is then the one refused. Nothing in the
 protocol tells the merchant which pubkey is the customer at the counter, so a
@@ -315,16 +316,16 @@ about the conflict; the merchant tells them in person.
   sent once per code. Sending event 3 again while the code is under 1 minute
   old gets them event 4 again, and the merchant no further event 5.
 - Any other pubkey that sends event 3 while the code is under 1 minute old
-  gets `regby_conflict` in place of event 4.
+  gets `regby_code_already_redeemed` in place of event 4.
 - The broker MUST also send the merchant a `regby_conflict` once for each such
   distinct pubkey: `e` naming event 1 and `to` naming that customer, like
   event 5. Its own intent, so a refused customer is never read as the one who
   got the text, even when event 5 itself is lost.
-- Both `regby_conflict`s carry the conflict warning as content, NIP-04
+- `regby_conflict` carries the conflict warning as content, NIP-04
   encrypted: `This ReGBY code was already redeemed by another npub.` It is
   for display only; a client MUST act on the intent, not on the wording.
 - A pubkey already named in a conflict that sends the code again gets
-  `regby_conflict` again, and the merchant no further notice.
+  `regby_code_already_redeemed` again, and the merchant no further notice.
 - The broker MUST stamp the notices of a code with `created_at` values at
   least one second apart, in the order their customers arrived, even when two
   customers send the code in the same second.
@@ -346,8 +347,9 @@ The broker:
 - MUST set `from` on event 4 to the pubkey that signed event 1, never to
   anything named inside the text.
 - MUST send event 5 after a successful event 4, even if no relay accepted
-  event 4, and a `regby_conflict` to every other customer and to the merchant
-  as in [Several customers](#several-customers).
+  event 4, and `regby_code_already_redeemed` to every other customer and a
+  `regby_conflict` to the merchant as in
+  [Several customers](#several-customers).
 - MUST send event 4 again only to the pubkey that redeemed the code, and only
   while the code is under 1 minute old.
 - SHOULD rate-limit each sender and the total mint and redeem rate, which also
@@ -380,10 +382,9 @@ Customer clients:
   their event 3.
 - MAY send event 3 again for the same code while it is under 1 minute old, for
   example after a lost reply, and get event 4 again.
-- MUST show a prominent warning on `regby_conflict`: someone else redeemed the
-  code first, possibly by reading it off the merchant's screen. The user
-  SHOULD NOT go on with the exchange and SHOULD ask the merchant to start over
-  with a new code.
+- On `regby_code_already_redeemed`, SHOULD tell the user someone else
+  redeemed the code first and ask the merchant for a new code. The user
+  SHOULD NOT go on with the exchange.
 - MUST treat the text as untrusted input and validate it. For a payment
   request, the user confirms recipient and amount before signing anything.
 
@@ -522,9 +523,9 @@ The reference relays are `wss://dm1.zentext.me`, `wss://dm2.nostr.box` and
   `regby_conflict`, including those refused because someone else was first.
 - **A conflict may mean the code was intercepted.** Whoever types a live code
   first gets the text, so someone who reads it off the merchant's screen can
-  beat the real customer to it. That is why both sides of a `regby_conflict`
-  MUST be warned, and why the exchange starts over with a new code instead of
-  trusting the pubkey in event 5.
+  beat the real customer to it. That is why the merchant MUST be warned on a
+  `regby_conflict`, and why the exchange starts over with a new code instead
+  of trusting the pubkey in event 5.
 - **No conflict, no warning.** If someone redeems a code read off the screen
   and the real customer types it only after its minute, the real customer gets
   `regby_code_expired`, not a conflict, and neither side is warned. The

@@ -9,14 +9,14 @@
  *                           inside its minute) and tell the merchant
  *                           `i:regby_content_delivered` (the stored content).
  *                           Any other customer inside the minute gets
- *                           `i:regby_conflict`, and so does the merchant, once
- *                           per such customer; both carry `CONFLICT_WARNING`.
- *                           Each notice is tagged `to` = that customer.
+ *                           `i:regby_code_already_redeemed`, and the merchant
+ *                           `i:regby_conflict` (`CONFLICT_WARNING`), once per
+ *                           such customer. Each notice is tagged `to` = that
+ *                           customer.
  * Content is opaque: never judged here, only carried (see `protocol.ts`).
- * A failure replies with its own `FAILURE_INTENT` and empty content (a
- * conflict: its warning). Every reply links to the request via the `e` tag,
- * and every reply about a code names it in `CODE_TAG`, the only place the code
- * travels.
+ * A failure replies with its own `FAILURE_INTENT` and empty content. Every
+ * reply links to the request via the `e` tag, and every reply about a code
+ * names it in `CODE_TAG`, the only place the code travels.
  */
 import type { Event } from 'nostr-tools';
 import type { Config } from './config.ts';
@@ -59,18 +59,12 @@ type AuditFields = Omit<AuditEntry, 'pubkey' | 'requestEvent'>;
 /** Remember processed event ids so a relay re-delivery can't double-mint. */
 const SEEN_MAX = 50_000;
 
-/** Both conflict events, the customer's refusal and the merchant's notice, from one definition. */
-const CONFLICT = { intent: CONFLICT_INTENT, content: CONFLICT_WARNING } as const;
-
-/**
- * Reply per redeem refusal (see `FAILURE_INTENT` for the app contract): empty
- * content, but a conflict tells the customer what happened.
- */
-const REDEEM_REFUSAL: Record<RedeemFailureReason, { intent: FailureIntent; content: string }> = {
-  redeemed: CONFLICT,
-  expired: { intent: FAILURE_INTENT.expired, content: EMPTY_CONTENT },
-  locked: { intent: FAILURE_INTENT.locked, content: EMPTY_CONTENT },
-  'not-found': { intent: FAILURE_INTENT.notFound, content: EMPTY_CONTENT },
+/** Reply intent per redeem refusal, each sent with empty content (see `FAILURE_INTENT`). */
+const REDEEM_REFUSAL: Record<RedeemFailureReason, FailureIntent> = {
+  redeemed: FAILURE_INTENT.redeemed,
+  expired: FAILURE_INTENT.expired,
+  locked: FAILURE_INTENT.locked,
+  'not-found': FAILURE_INTENT.notFound,
 };
 
 /**
@@ -100,7 +94,11 @@ interface MerchantMessage {
  * since a sink validates event names against its own build; this one is told
  * apart by `reason`, which is free text.
  */
-const CONFLICT_NOTICE: MerchantMessage = { ...CONFLICT, record: { reason: 'conflict' } };
+const CONFLICT_NOTICE: MerchantMessage = {
+  intent: CONFLICT_INTENT,
+  content: CONFLICT_WARNING,
+  record: { reason: 'conflict' },
+};
 
 /** Single bucket key for the global (all-sender) limiters. */
 const GLOBAL_KEY = 'all';
@@ -315,8 +313,7 @@ export class ReGBYBroker {
         from,
         reason: result.reason,
       });
-      const refusal = REDEEM_REFUSAL[result.reason];
-      await this.answer(target, refusal.intent, refusal.content, {
+      await this.answer(target, REDEEM_REFUSAL[result.reason], EMPTY_CONTENT, {
         event: 'redeem_refused',
         code: message.code,
         reason: result.reason,

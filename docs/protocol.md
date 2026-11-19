@@ -66,15 +66,13 @@ signature, so intents and pairing tags are authenticated too.
 
 A failure has its own intent, empty content and no pairing tag. There is no
 free error text, so the untrusted broker has no channel into the app's UI.
-The one exception is `regby_conflict`, which carries the fixed conflict
-warning; apps show their own warning for the intent, not the broker's words.
 Because a success can carry empty content too, **clients read the intent
 first**, never the content.
 
 | intent | answers | when |
 | --- | --- | --- |
 | `regby_code_busy` | `request_regby_code` | No free code: `REGBY_STORE_MAX` codes issued in the last 72 h. |
-| `regby_conflict` | `request_regby_content` | The code was used by **another** pubkey and is still inside its minute. Content: the conflict warning. Apps MUST show it as a warning (see [Redeeming](#redeeming-request_regby_content)). |
+| `regby_code_already_redeemed` | `request_regby_content` | The code was used by **another** pubkey and is still inside its minute. The merchant gets a `regby_conflict` (see [Redeeming](#redeeming-request_regby_content)). |
 | `regby_code_expired` | `request_regby_content` | Past its minute, used or not, under `REGBY_CODE_RETAIN_SECONDS` (1 h) old. |
 | `regby_code_locked` | `request_regby_content` | 1 h to 72 h old; the number is held back from reuse. |
 | `regby_code_not_found` | `request_regby_content` | Never issued, or over 72 h old. |
@@ -151,7 +149,7 @@ and never decrypted. Then:
 
   | age | reply |
   | --- | --- |
-  | under 1 min, used by another pubkey | `regby_conflict` |
+  | under 1 min, used by another pubkey | `regby_code_already_redeemed` |
   | 1 min to 1 h, used or not | `regby_code_expired` |
   | 1 h to 72 h | `regby_code_locked` |
   | never issued, or over 72 h | `regby_code_not_found` |
@@ -165,7 +163,8 @@ after it the merchant re-mints.
 **One merchant notice per customer.** Every distinct pubkey that sends the
 code while it is under 1 min old gets the merchant one notice: the winner a
 `regby_content_delivered` (the content) after their `regby_content`, each
-later one a `regby_conflict` (the warning) after their own `regby_conflict`.
+later one a `regby_conflict` (the warning) after their own
+`regby_code_already_redeemed`.
 Separate intents, so the merchant never mistakes a refused customer for the
 winner, even when the winner's notice reached no relay. A pubkey already
 counted gets no further notice: the winner is served again, a refused one
@@ -173,12 +172,13 @@ refused again. Past the minute nobody is counted. The store keeps the counted
 pubkeys per code in `redeemers`, carried across midnight and wiped from
 archives like the origin.
 
-**A conflict is a warning on both sides.** The first to type a live code gets
-the content, so an onlooker who reads it off the merchant's screen can beat
-the real customer to it. The refused customer may be the real one, and the
-pubkey in `regby_content_delivered` an attacker: apps MUST show
-`regby_conflict` prominently, to the customer as "someone else got this
-code" and to the merchant as "check who you are dealing with".
+**A conflict is a warning to the merchant.** The first to type a live code
+gets the content, so an onlooker who reads it off the merchant's screen can
+beat the real customer to it. The refused customer may be the real one, and
+the pubkey in `regby_content_delivered` an attacker: the merchant's app MUST
+show `regby_conflict` prominently, as "check who you are dealing with". The
+refused customer gets the plain `regby_code_already_redeemed` failure and
+asks for a new code.
 
 **Notices keep arrival order.** Each notice is stamped with the moment the
 store counted its customer, and at least one second after the previous notice

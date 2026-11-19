@@ -96,7 +96,7 @@ Event:
 `regby_code` is required: it is the only place the server reads the code
 from. A hop 3 without an eight-digit `regby_code` tag is dropped with no reply;
 its `content` is never decrypted.
-Server: `store.redeem("42891337", customer pubkey)` → found + unexpired → returns the content and the merchant who asked for it, and **consumes** the code: it stamps `redeemed_at` and `redeemed_by` (this customer), so inside the code's minute this customer is served again and anyone else gets `regby_conflict`, and after it the code's age decides (see the error variant). The customer is also counted for hop 5 (see [Another customer](#another-customer-inside-the-minute)). The row (content included) stays 72 h for debugging, then is deleted.
+Server: `store.redeem("42891337", customer pubkey)` → found + unexpired → returns the content and the merchant who asked for it, and **consumes** the code: it stamps `redeemed_at` and `redeemed_by` (this customer), so inside the code's minute this customer is served again and anyone else gets `regby_code_already_redeemed`, and after it the code's age decides (see the error variant). The customer is also counted for hop 5 (see [Another customer](#another-customer-inside-the-minute)). The row (content included) stays 72 h for debugging, then is deleted.
 
 ## Hop 4 - middleman → customer (`i: regby_content`)
 
@@ -169,12 +169,9 @@ published. An app that predates this intent drops the event as unknown.
 
 A second customer (`d0d0...d0d0`) sends the same code one second after the
 first, while it is still inside its minute. Another pubkey already used it,
-so instead of hop 4 they get a `regby_conflict`, and the merchant gets one
-too, naming them. Both carry the same fixed warning as content, never the
-merchant's text. Decrypted `content` of both:
-```
-This ReGBY code was already redeemed by another npub.
-```
+so instead of hop 4 they get `regby_code_already_redeemed`, a plain failure
+with empty content, and the merchant gets a `regby_conflict` naming them.
+
 To the second customer, in place of hop 4 (`e` = their own hop 3, no `from`):
 
 ```json
@@ -185,17 +182,21 @@ To the second customer, in place of hop 4 (`e` = their own hop 3, no `from`):
   "tags": [
     ["p","d0d0...d0d0"],
     ["e","b27c1e90...0033333"],
-    ["i","regby_conflict"],
+    ["i","regby_code_already_redeemed"],
     ["expiration","1750838372"],
     ["client","regby-middleware"],
     ["regby_code","42891337"]
   ],
-  "content": "AgB1q9Zc...==",
+  "content": "",
   "id": "…", "sig": "…"
 }
 ```
 
-To the merchant, on their own hop 1 like hop 5 (`to` = the refused customer):
+To the merchant, on their own hop 1 like hop 5 (`to` = the refused customer).
+Its content is a fixed warning, never the merchant's text. Decrypted:
+```
+This ReGBY code was already redeemed by another npub.
+```
 
 ```json
 {
@@ -216,13 +217,14 @@ To the merchant, on their own hop 1 like hop 5 (`to` = the refused customer):
 }
 ```
 
-- Both apps show it as a warning, not a routine error: the first to type the
-  code may have read it off the merchant's screen, so the refused customer can
-  be the real one and the pubkey in hop 5 an onlooker.
+- The merchant's app shows the conflict as a warning, not a routine notice:
+  the first to type the code may have read it off the merchant's screen, so
+  the refused customer can be the real one and the pubkey in hop 5 an
+  onlooker.
 - One notice per distinct customer pubkey: hop 5 for the winner, a
   `regby_conflict` for each refused one. The winner sending the code again
-  inside the minute gets hop 4 again; a refused customer gets `regby_conflict`
-  again. Neither causes a further notice.
+  inside the minute gets hop 4 again; a refused customer gets
+  `regby_code_already_redeemed` again. Neither causes a further notice.
 - The intent alone says who got the content, whatever order the notices
   arrive in. The server also stamps each notice for the code at least one
   second after the previous one, so they keep the order the customers arrived

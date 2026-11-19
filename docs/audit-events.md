@@ -47,7 +47,7 @@ can say whether the reply reached a relay (`delivered`).
 | `code_issued` | content (any text) got a code | merchant | the content back, tagged `regby_code` = the code | issued code | yes | - | true / false |
 | `regby_busy` | no free code: `REGBY_STORE_MAX` codes were already issued in the last 72 h | merchant | `regby_code_busy` | - | yes | - | true / false |
 | `redeem` | the code was valid and is now used up, or its winner fetched it again inside the minute | customer | the content, tagged `from` = merchant | typed code | yes | `repeat` for the winner fetching it again, otherwise - | true / false |
-| `redeem_refused` | the code could not be used | customer | `regby_conflict` (with the conflict warning) / `regby_code_expired` / `regby_code_locked` / `regby_code_not_found` | typed code | - | `redeemed` / `expired` / `locked` / `not-found` | true / false |
+| `redeem_refused` | the code could not be used | customer | `regby_code_already_redeemed` / `regby_code_expired` / `regby_code_locked` / `regby_code_not_found` | typed code | - | `redeemed` / `expired` / `locked` / `not-found` | true / false |
 | `blacklisted` | a code guesser, blocked for `REGBY_BLACKLIST_SECONDS` (default 24 h) | customer | **no reply** | typed code | - | `guessing` | null |
 | `merchant_notified` | the merchant was told a customer sent their code inside its minute, tagged `to` = customer: `regby_content_delivered` after the first `redeem`, and `regby_conflict` after each `redeem_refused` / `redeemed` from a customer not counted for that code yet. Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_content_delivered` (content = the content) or `regby_conflict` (content = the conflict warning) | the code | for `regby_content_delivered` only | `conflict` for a `regby_conflict`, otherwise - | true / false |
 
@@ -93,7 +93,7 @@ or `redeem_refused` row for the same code just before it.
 | `event` | `reason` | meaning | reply intent |
 | --- | --- | --- | --- |
 | `redeem_refused` | `expired` | The code's 60 s (`REGBY_CODE_TTL_SECONDS`) had passed, used or not, and it is under `REGBY_CODE_RETAIN_SECONDS` (1 h) old. | `regby_code_expired` |
-| `redeem_refused` | `redeemed` | The code was already used by another customer, and is still inside its 60 s. | `regby_conflict`, with the conflict warning |
+| `redeem_refused` | `redeemed` | The code was already used by another customer, and is still inside its 60 s. | `regby_code_already_redeemed` |
 | `redeem_refused` | `locked` | The code was issued 1 h to 72 h ago; its number is held back from reuse. Counts as a guess. | `regby_code_locked` |
 | `redeem_refused` | `not-found` | No such code, or it was issued more than 72 h ago. Counts as a guess. | `regby_code_not_found` |
 | `blacklisted` | `guessing` | One customer had more than `REGBY_REDEEM_FAIL_MAX` (default 10) `not-found` or `locked` codes within `REGBY_REDEEM_RATE_WINDOW_SECONDS` (default 60 s). The earlier misses are on record as `redeem_refused` / `not-found` or `locked`. No reply is sent, so the guesser can't tell a miss from a block. Blocked for 24 h. | nothing |

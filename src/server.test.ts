@@ -235,18 +235,18 @@ test('the merchant is notified even when the customer\'s reply reached no relay'
   });
 });
 
-test('a second customer inside the minute gets a conflict, and so does the merchant', async () => {
+test('a second customer inside the minute is refused as already redeemed, and the merchant gets a conflict', async () => {
   const clock = storeClock();
   await withBroker(async (transport, audit) => {
     const code = await mint(transport);
     await transport.redeem('3', CUSTOMER, code);
     await transport.redeem('4', SECOND_CUSTOMER, code); // same second
-    // The refused customer is told why, not handed an empty error.
+    // The refused customer gets a plain failure; only the merchant is warned.
     const refusal = transport.sent.find((r) => r.target.recipientPubkey === SECOND_CUSTOMER);
     assert.deepEqual(refusal, {
       target: { recipientPubkey: SECOND_CUSTOMER, requestEventId: '4'.repeat(64) },
-      intent: 'regby_conflict',
-      content: CONFLICT_WARNING,
+      intent: 'regby_code_already_redeemed',
+      content: '',
       extraTags: [[CODE_TAG, code]],
     });
     // The winner's notice echoes the content; the conflict carries the warning
@@ -287,7 +287,7 @@ test('the winner asking again is served again; a refused customer is refused aga
       content: INVOICE,
       extraTags: [[CODE_TAG, code], [FROM_TAG, MERCHANT]],
     });
-    assert.equal(answer('6')?.intent, 'regby_conflict');
+    assert.equal(answer('6')?.intent, 'regby_code_already_redeemed');
     assert.deepEqual(
       transport.sent.filter((r) => r.target.recipientPubkey === MERCHANT && r.intent !== 'regby_code').map((r) => r.intent),
       ['regby_content_delivered', 'regby_conflict'],

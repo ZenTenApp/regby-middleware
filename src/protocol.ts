@@ -11,12 +11,12 @@
  * Transport is a standard encrypted **DM (kind 4)** so events are treated as
  * messages. Design:
  *   - `content` is the merchant's **raw text**, NIP-04 encrypted, on the code
- *     request, the code reply, the content reply and the delivered notice. No
- *     JSON wrapper. It is never the code. Empty content is the exception: it
- *     travels as a raw `""`, never encrypted (`EMPTY_CONTENT`), and so do the
- *     redeem request and every failure but a conflict, which carries the fixed
- *     `CONFLICT_WARNING`. Some NIP-04 clients or relays may choke on a kind 4
- *     with empty content; untested on our relays so far.
+ *     request, the code reply, the content reply and the delivered notice, and
+ *     the fixed `CONFLICT_WARNING` on the conflict notice. No JSON wrapper. It
+ *     is never the code. Empty content is the exception: it travels as a raw
+ *     `""`, never encrypted (`EMPTY_CONTENT`), and so do the redeem request and
+ *     every failure. Some NIP-04 clients or relays may choke on a kind 4 with
+ *     empty content; untested on our relays so far.
  *   - the code rides only in the plaintext `CODE_TAG`: the broker sets it on
  *     every reply about a code and reads it from the redeem request.
  *   - the message **intent** rides a plaintext `['i', <intent>]` tag -
@@ -26,10 +26,9 @@
  *     so the client matches a reply to the request it published - no in-band
  *     correlation id needed.
  *   - a failure reply names the outcome in its intent (`FAILURE_INTENT`,
- *     e.g. `regby_code_expired`) and carries empty `content` (a conflict: its
- *     warning) and no pairing tag. Empty content alone means nothing: a
- *     success may carry empty content too, so the client reads the intent
- *     first.
+ *     e.g. `regby_code_expired`) and carries empty `content` and no pairing
+ *     tag. Empty content alone means nothing: a success may carry empty
+ *     content too, so the client reads the intent first.
  *   - relay retention is bounded by NIP-40 `['expiration', unixSec]`.
  *
  * Tags are covered by the event signature, so intent/linkage are authenticated.
@@ -89,33 +88,19 @@ export const REPLY_INTENT = {
 } as const satisfies Record<InboundIntent, string>;
 
 /**
- * A conflict: a customer sent a code inside its validity after ANOTHER pubkey
- * redeemed it. Sent both ways, each time with `CONFLICT_WARNING` as content:
- * as the refusal answering that customer's `request_regby_content`, and as a
- * notice to the merchant (`e` = their own `request_regby_code`, `to` = that
- * customer), once per distinct customer pubkey. Either side of it may be the
- * victim: whoever got the content may have read the code off a screen and beaten
- * the real customer to it, so apps must show it as a warning, not a routine error.
- */
-export const CONFLICT_INTENT = 'regby_conflict';
-
-/** Content of every `CONFLICT_INTENT` event: a fixed warning, never the merchant's text. */
-export const CONFLICT_WARNING = 'This ReGBY code was already redeemed by another npub.';
-
-/**
- * The intent of every failure reply, sent with empty content but a conflict
- * (see `CONFLICT_INTENT`). `busy` answers a `request_regby_code` (no free code
- * to mint), the rest a `request_regby_content`, one per state of the code (see
- * `store.ts`): used by another pubkey inside its minute, lapsed (used or not),
- * held back from reuse, unknown. The app must know each one: an intent it does
- * not recognise never matches its pending request, so a new failure needs an
- * app release first. Pinned against the app's `utils/regby.ts` by the parity
- * test in `protocol.test.ts`.
+ * The intent of every failure reply, sent with empty content. `busy` answers a
+ * `request_regby_code` (no free code to mint), the rest a
+ * `request_regby_content`, one per state of the code (see `store.ts`): used by
+ * another pubkey inside its minute, lapsed (used or not), held back from
+ * reuse, unknown. The app must know each one: an intent it does not recognise
+ * never matches its pending request, so a new failure needs an app release
+ * first. Pinned against the app's `utils/regby.ts` by the parity test in
+ * `protocol.test.ts`.
  */
 export const FAILURE_INTENT = {
   notFound: 'regby_code_not_found',
   expired: 'regby_code_expired',
-  conflict: CONFLICT_INTENT,
+  redeemed: 'regby_code_already_redeemed',
   locked: 'regby_code_locked',
   busy: 'regby_code_busy',
 } as const;
@@ -132,13 +117,28 @@ export const FAILURE_INTENT = {
  */
 export const CONTENT_DELIVERED_INTENT = 'regby_content_delivered';
 
+/**
+ * A conflict: a customer sent a code inside its validity after ANOTHER pubkey
+ * redeemed it. A notice to the MERCHANT only (`e` = their own
+ * `request_regby_code`, `to` = that customer, content = `CONFLICT_WARNING`),
+ * once per distinct customer pubkey; the refused customer gets the plain
+ * `regby_code_already_redeemed` failure. Whoever got the content may have read
+ * the code off a screen and beaten the real customer to it, so the merchant's
+ * app must show it as a warning, not a routine notice.
+ */
+export const CONFLICT_INTENT = 'regby_conflict';
+
+/** Content of the `CONFLICT_INTENT` notice: a fixed warning, never the merchant's text. */
+export const CONFLICT_WARNING = 'This ReGBY code was already redeemed by another npub.';
+
 export type FailureIntent = (typeof FAILURE_INTENT)[keyof typeof FAILURE_INTENT];
 
 /** Every intent the middleman emits. */
 export type OutboundIntent =
   | (typeof REPLY_INTENT)[InboundIntent]
   | FailureIntent
-  | typeof CONTENT_DELIVERED_INTENT;
+  | typeof CONTENT_DELIVERED_INTENT
+  | typeof CONFLICT_INTENT;
 
 /**
  * Plaintext tags naming the counterparty by hex pubkey (as `p` does), so each

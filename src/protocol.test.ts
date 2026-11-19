@@ -126,7 +126,7 @@ test('real text is never read as binary', () => {
 const PARITY_FAILURE_INTENTS: readonly string[] = [
   'regby_code_not_found',
   'regby_code_expired',
-  'regby_conflict',
+  'regby_code_already_redeemed',
   'regby_code_locked',
   'regby_code_busy',
 ];
