@@ -12,8 +12,7 @@
  *
  * The full content travels for a SERVED request (code_issued, regby_busy,
  * redeem) and for the delivered merchant notice, which echoes it; a conflict
- * carries a fixed warning, not the content, so its row has none. Content is
- * opaque, so nothing here reads or redacts it.
+ * notice carries none. Content is opaque, so nothing here reads or redacts it.
  */
 import { MAX_CONTENT_LENGTH, REGBY_CODE_RE } from './protocol.ts';
 import { required } from './env.ts';

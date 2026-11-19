@@ -192,11 +192,8 @@ To the second customer, in place of hop 4 (`e` = their own hop 3, no `from`):
 }
 ```
 
-To the merchant, on their own hop 1 like hop 5 (`to` = the refused customer).
-Its content is a fixed warning, never the merchant's text. Decrypted:
-```
-This ReGBY code was already redeemed by another npub.
-```
+To the merchant, on their own hop 1 like hop 5 (`to` = the refused customer),
+with empty content: the intent and the `to` tag say it all.
 
 ```json
 {
@@ -212,7 +209,7 @@ This ReGBY code was already redeemed by another npub.
     ["regby_code","42891337"],
     ["to","d0d0...d0d0"]
   ],
-  "content": "AgE4tL0w...==",
+  "content": "",
   "id": "…", "sig": "…"
 }
 ```

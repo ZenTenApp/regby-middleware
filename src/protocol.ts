@@ -11,12 +11,12 @@
  * Transport is a standard encrypted **DM (kind 4)** so events are treated as
  * messages. Design:
  *   - `content` is the merchant's **raw text**, NIP-04 encrypted, on the code
- *     request, the code reply, the content reply and the delivered notice, and
- *     the fixed `CONFLICT_WARNING` on the conflict notice. No JSON wrapper. It
- *     is never the code. Empty content is the exception: it travels as a raw
- *     `""`, never encrypted (`EMPTY_CONTENT`), and so do the redeem request and
- *     every failure. Some NIP-04 clients or relays may choke on a kind 4 with
- *     empty content; untested on our relays so far.
+ *     request, the code reply, the content reply and the delivered notice. No
+ *     JSON wrapper. It is never the code. Empty content is the exception: it
+ *     travels as a raw `""`, never encrypted (`EMPTY_CONTENT`), and so do the
+ *     redeem request, the conflict notice and every failure. Some NIP-04
+ *     clients or relays may choke on a kind 4 with empty content; untested on
+ *     our relays so far.
  *   - the code rides only in the plaintext `CODE_TAG`: the broker sets it on
  *     every reply about a code and reads it from the redeem request.
  *   - the message **intent** rides a plaintext `['i', <intent>]` tag -
@@ -120,16 +120,14 @@ export const CONTENT_DELIVERED_INTENT = 'regby_content_delivered';
 /**
  * A conflict: a customer sent a code inside its validity after ANOTHER pubkey
  * redeemed it. A notice to the MERCHANT only (`e` = their own
- * `request_regby_code`, `to` = that customer, content = `CONFLICT_WARNING`),
- * once per distinct customer pubkey; the refused customer gets the plain
+ * `request_regby_code`, `to` = that customer, empty content), once per
+ * distinct customer pubkey; the refused customer gets the plain
  * `regby_code_already_redeemed` failure. Whoever got the content may have read
  * the code off a screen and beaten the real customer to it, so the merchant's
- * app must show it as a warning, not a routine notice.
+ * app must show it as a warning, not a routine notice. The wording is the
+ * app's own: the broker sends no text, as on a failure.
  */
 export const CONFLICT_INTENT = 'regby_conflict';
-
-/** Content of the `CONFLICT_INTENT` notice: a fixed warning, never the merchant's text. */
-export const CONFLICT_WARNING = 'This ReGBY code was already redeemed by another npub.';
 
 export type FailureIntent = (typeof FAILURE_INTENT)[keyof typeof FAILURE_INTENT];
 

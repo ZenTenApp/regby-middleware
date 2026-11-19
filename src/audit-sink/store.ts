@@ -39,7 +39,7 @@ const COLUMNS: readonly Column[] = [
   { name: 'code', type: 'text', required: false, value: (r) => r.code,
     comment: 'The 8-digit code: issued (code_issued), presented by the customer (redeem, redeem_refused, blacklisted/guessing), or the one a merchant notice is about (merchant_notified). Null otherwise.' },
   { name: 'content', type: 'text', required: false, value: (r) => r.content,
-    comment: 'Full content as sent (any text, empty included), only for served requests (code_issued, regby_busy, redeem) and for the delivered merchant_notified, which echoes it to the merchant. Null on a conflict notice, which carries a fixed warning instead.' },
+    comment: 'Full content as sent (any text, empty included), only for served requests (code_issued, regby_busy, redeem) and for the delivered merchant_notified, which echoes it to the merchant. Null on a conflict notice, which carries no content.' },
   { name: 'reason', type: 'text', required: false, value: (r) => r.reason,
     comment: 'Why the request was refused. redeem_refused: expired | redeemed | locked | not-found. blacklisted: guessing (older history: malicious). invalid_request (older history): malformed. merchant_notified: conflict for the notice about a customer refused after the code was redeemed. redeem: repeat when the winner was served the content again inside the minute. Null for the rest.' },
   { name: 'delivered', type: 'boolean', required: false, value: (r) => r.delivered,

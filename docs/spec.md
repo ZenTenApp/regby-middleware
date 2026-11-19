@@ -82,9 +82,7 @@ This section applies to events 1 to 5. Event 6 is defined in
 All are `kind:4` events.
 
 - `content` is the NIP-04 ciphertext of the raw text, with no JSON wrapper. It
-  is never the code: the code travels only in the `regby_code` tag. The one
-  exception is `regby_conflict`, whose content is the
-  [conflict warning](#several-customers), never the text.
+  is never the code: the code travels only in the `regby_code` tag.
 - An empty value is sent as `""`, not encrypted. A receiver MUST check for
   `""` before decrypting.
 - Each event MUST carry:
@@ -119,7 +117,7 @@ signature and MUST NOT treat a successful decrypt as proof of who sent it.
 | 3 | `request_regby_content` | customer to broker | `""` |
 | 4 | `regby_content` | broker to customer | text, exactly as sent in event 1 |
 | 5 | `regby_content_delivered` | broker to merchant | text, exactly as received in event 4 |
-| 5, conflict | `regby_conflict` | broker to merchant | the conflict warning |
+| 5, conflict | `regby_conflict` | broker to merchant | `""` |
 
 Failures replace event 2 or event 4. Their content is `""`, and they carry
 no `from` or `to` tag.
@@ -255,7 +253,7 @@ notice:
     ["regby_code", "42891337"],
     ["to", "<second customer>"]
   ],
-  "content": "This ReGBY code was already redeemed by another npub."
+  "content": ""
 }
 ```
 
@@ -321,9 +319,7 @@ about the conflict; the merchant tells them in person.
   distinct pubkey: `e` naming event 1 and `to` naming that customer, like
   event 5. Its own intent, so a refused customer is never read as the one who
   got the text, even when event 5 itself is lost.
-- `regby_conflict` carries the conflict warning as content, NIP-04
-  encrypted: `This ReGBY code was already redeemed by another npub.` It is
-  for display only; a client MUST act on the intent, not on the wording.
+- `regby_conflict` carries no text (`""`).
 - A pubkey already named in a conflict that sends the code again gets
   `regby_code_already_redeemed` again, and the merchant no further notice.
 - The broker MUST stamp the notices of a code with `created_at` values at

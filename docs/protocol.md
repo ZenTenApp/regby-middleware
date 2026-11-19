@@ -60,7 +60,7 @@ signature, so intents and pairing tags are authenticated too.
 | customer to broker | `request_regby_content` | `""` | `regby_code` = the code (required) |
 | broker to customer | `regby_content` | the merchant's text | `regby_code`; `from` = merchant hex pubkey |
 | broker to merchant | `regby_content_delivered` | the merchant's text, as the customer received it | `regby_code`; `to` = customer hex pubkey; `e` = the merchant's original request. Once per code |
-| broker to merchant | `regby_conflict` | the conflict warning, `This ReGBY code was already redeemed by another npub.` | `regby_code`; `to` = a customer refused after the redeem; `e` = the merchant's original request. One per such customer, see [Redeeming](#redeeming-request_regby_content) |
+| broker to merchant | `regby_conflict` | `""` | `regby_code`; `to` = a customer refused after the redeem; `e` = the merchant's original request. One per such customer, see [Redeeming](#redeeming-request_regby_content) |
 
 ### Failures
 
@@ -163,10 +163,10 @@ after it the merchant re-mints.
 **One merchant notice per customer.** Every distinct pubkey that sends the
 code while it is under 1 min old gets the merchant one notice: the winner a
 `regby_content_delivered` (the content) after their `regby_content`, each
-later one a `regby_conflict` (the warning) after their own
-`regby_code_already_redeemed`.
-Separate intents, so the merchant never mistakes a refused customer for the
-winner, even when the winner's notice reached no relay. A pubkey already
+later one an empty `regby_conflict` after their own
+`regby_code_already_redeemed`. Separate intents, so the merchant never
+mistakes a refused customer for the winner, even when the winner's notice
+reached no relay. A pubkey already
 counted gets no further notice: the winner is served again, a refused one
 refused again. Past the minute nobody is counted. The store keeps the counted
 pubkeys per code in `redeemers`, carried across midnight and wiped from
@@ -176,9 +176,9 @@ archives like the origin.
 gets the content, so an onlooker who reads it off the merchant's screen can
 beat the real customer to it. The refused customer may be the real one, and
 the pubkey in `regby_content_delivered` an attacker: the merchant's app MUST
-show `regby_conflict` prominently, as "check who you are dealing with". The
-refused customer gets the plain `regby_code_already_redeemed` failure and
-asks for a new code.
+show `regby_conflict` prominently, as "check who you are dealing with",
+worded by the app itself (the notice carries no text). The refused customer
+gets the plain `regby_code_already_redeemed` failure and asks for a new code.
 
 **Notices keep arrival order.** Each notice is stamped with the moment the
 store counted its customer, and at least one second after the previous notice

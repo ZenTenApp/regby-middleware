@@ -35,7 +35,7 @@ can say whether the reply reached a relay (`delivered`).
 | `pubkey` | text | no | Full 64-character hex pubkey of whoever sent the request. See [Events](#events) for whether that is the merchant or the customer. |
 | `request_event` | text | no | Id of the incoming Nostr event (kind 4) this row answers. The relays keep events for at most 72 h. |
 | `code` | text | yes | The 8-digit code. For `code_issued` it is the code that was issued. For `redeem`, `redeem_refused` and `blacklisted`/`guessing` it is the code the customer typed. For `merchant_notified` it is the code the notice is about. |
-| `content` | text | yes | The full content as sent: any text, a `defito://` invoice or empty included. Set **only** for served requests (`code_issued`, `regby_busy`, `redeem`) and for the delivered `merchant_notified`, which echoes it. A conflict carries a fixed warning, not the content, so its row has none. |
+| `content` | text | yes | The full content as sent: any text, a `defito://` invoice or empty included. Set **only** for served requests (`code_issued`, `regby_busy`, `redeem`) and for the delivered `merchant_notified`, which echoes it. A conflict notice carries none, so its row has none either. |
 | `reason` | text | yes | Why the request was refused. See [reason values](#reason-values). |
 | `delivered` | boolean | yes | Whether the reply reached at least one relay. Null when no reply was sent. See [delivered](#delivered). |
 | `received_at` | bigint | no | Sink time, in unix seconds, when the row was stored. If it is much later than `ts`, the sink or the database was down and the broker kept retrying. |
@@ -49,7 +49,7 @@ can say whether the reply reached a relay (`delivered`).
 | `redeem` | the code was valid and is now used up, or its winner fetched it again inside the minute | customer | the content, tagged `from` = merchant | typed code | yes | `repeat` for the winner fetching it again, otherwise - | true / false |
 | `redeem_refused` | the code could not be used | customer | `regby_code_already_redeemed` / `regby_code_expired` / `regby_code_locked` / `regby_code_not_found` | typed code | - | `redeemed` / `expired` / `locked` / `not-found` | true / false |
 | `blacklisted` | a code guesser, blocked for `REGBY_BLACKLIST_SECONDS` (default 24 h) | customer | **no reply** | typed code | - | `guessing` | null |
-| `merchant_notified` | the merchant was told a customer sent their code inside its minute, tagged `to` = customer: `regby_content_delivered` after the first `redeem`, and `regby_conflict` after each `redeem_refused` / `redeemed` from a customer not counted for that code yet. Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_content_delivered` (content = the content) or `regby_conflict` (content = the conflict warning) | the code | for `regby_content_delivered` only | `conflict` for a `regby_conflict`, otherwise - | true / false |
+| `merchant_notified` | the merchant was told a customer sent their code inside its minute, tagged `to` = customer: `regby_content_delivered` after the first `redeem`, and `regby_conflict` after each `redeem_refused` / `redeemed` from a customer not counted for that code yet. Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_content_delivered` (content = the content) or `regby_conflict` (empty content) | the code | for `regby_content_delivered` only | `conflict` for a `regby_conflict`, otherwise - | true / false |
 
 The broker never refuses content for what it says (see [protocol.md](protocol.md)), so no event
 records a refused payload. History written by a broker from before that
@@ -67,7 +67,7 @@ request AND the reply:
 | `code_issued` | the content | the content back and the code | both |
 | `redeem` | the code | the content | both |
 | `redeem_refused`, `blacklisted` | the code | a reason, or nothing | the code |
-| `merchant_notified` | (none: a notice) | the content (or, for a conflict, the warning) and the code | the content (delivered only) and the code |
+| `merchant_notified` | (none: a notice) | the content (none for a conflict) and the code | the content (delivered only) and the code |
 
 A "-" means the column is null for that event.
 

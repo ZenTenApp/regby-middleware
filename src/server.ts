@@ -10,8 +10,8 @@
  *                           `i:regby_content_delivered` (the stored content).
  *                           Any other customer inside the minute gets
  *                           `i:regby_code_already_redeemed`, and the merchant
- *                           `i:regby_conflict` (`CONFLICT_WARNING`), once per
- *                           such customer. Each notice is tagged `to` = that
+ *                           `i:regby_conflict` (empty content), once per such
+ *                           customer. Each notice is tagged `to` = that
  *                           customer.
  * Content is opaque: never judged here, only carried (see `protocol.ts`).
  * A failure replies with its own `FAILURE_INTENT` and empty content. Every
@@ -34,7 +34,6 @@ import { nowSeconds } from './time.ts';
 import {
   CODE_TAG,
   CONFLICT_INTENT,
-  CONFLICT_WARNING,
   CONTENT_DELIVERED_INTENT,
   EMPTY_CONTENT,
   extractIntent,
@@ -89,14 +88,14 @@ interface MerchantMessage {
 }
 
 /**
- * The notice about a refused customer. Fixed: a warning, not the merchant's
- * text, so its row keeps no content. Both notices audit as `merchant_notified`,
- * since a sink validates event names against its own build; this one is told
- * apart by `reason`, which is free text.
+ * The notice about a refused customer. Its content is empty (the intent and
+ * `to` tag say it all), so its row records none. Both notices audit as
+ * `merchant_notified`, since a sink validates event names against its own
+ * build; this one is told apart by `reason`, which is free text.
  */
 const CONFLICT_NOTICE: MerchantMessage = {
   intent: CONFLICT_INTENT,
-  content: CONFLICT_WARNING,
+  content: EMPTY_CONTENT,
   record: { reason: 'conflict' },
 };
 

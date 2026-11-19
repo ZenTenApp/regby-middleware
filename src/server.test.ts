@@ -6,7 +6,7 @@ import { CodeStore } from './store.ts';
 import type { Config } from './config.ts';
 import type { ReGBYTransport, ReplyOptions, ReplyTarget } from './nostr.ts';
 import type { AuditEntry, AuditSink } from './audit-sender.ts';
-import { CODE_TAG, CONFLICT_WARNING, FROM_TAG, TO_TAG, type OutboundIntent } from './protocol.ts';
+import { CODE_TAG, FROM_TAG, TO_TAG, type OutboundIntent } from './protocol.ts';
 
 const BROKER = 'f'.repeat(64);
 const MERCHANT = 'a'.repeat(64);
@@ -249,17 +249,17 @@ test('a second customer inside the minute is refused as already redeemed, and th
       content: '',
       extraTags: [[CODE_TAG, code]],
     });
-    // The winner's notice echoes the content; the conflict carries the warning
-    // instead. The stamps keep the order the customers arrived in.
+    // The winner's notice echoes the content; the conflict is empty. The
+    // stamps keep the order the customers arrived in.
     const notices = transport.sent.filter((r) => r.target.recipientPubkey === MERCHANT && r.intent !== 'regby_code');
     assert.deepEqual(
       notices.map((r) => [r.intent, r.target.requestEventId, r.content, r.extraTags, r.createdAt]),
       [
         ['regby_content_delivered', '1'.repeat(64), INVOICE, [[CODE_TAG, code], [TO_TAG, CUSTOMER]], clock.at],
-        ['regby_conflict', '1'.repeat(64), CONFLICT_WARNING, [[CODE_TAG, code], [TO_TAG, SECOND_CUSTOMER]], clock.at + 1],
+        ['regby_conflict', '1'.repeat(64), '', [[CODE_TAG, code], [TO_TAG, SECOND_CUSTOMER]], clock.at + 1],
       ],
     );
-    // Only the merchant's own text is recorded as content; the fixed warning is not.
+    // Only the merchant's own text is recorded as content.
     assert.deepEqual(
       audit.entries.map((e) => [e.event, e.pubkey, e.reason, e.content]),
       [
