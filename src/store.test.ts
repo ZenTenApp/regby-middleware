@@ -4,13 +4,49 @@ import { DatabaseSync } from 'node:sqlite';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { CODE_REUSE_SECONDS, CodeStore, RotatingCodeStore, dailyDbPath, type CodeOrigin } from './store.ts';
+import {
+  CODE_REUSE_SECONDS,
+  CodeStore,
+  RotatingCodeStore,
+  dailyDbPath,
+  type CodeOrigin,
+  type RedeemResult,
+} from './store.ts';
 
 const TTL = 120; // 2-min validity
 const RETAIN = 3600; // 1-h retention
 
 /** The merchant behind every code these tests mint. */
 const ORIGIN: CodeOrigin = { merchantPubkey: 'a'.repeat(64), requestEvent: 'b'.repeat(64) };
+
+/** The customer who redeems first; the others arrive once the code is used. */
+const CUSTOMER = 'e'.repeat(64);
+const SECOND = 'f'.repeat(64);
+const THIRD = '1'.repeat(64);
+const FOURTH = '2'.repeat(64);
+
+/** A winning redeem at `at`, its merchant notice stamped then. */
+function served(content: string, at: number, origin: CodeOrigin = ORIGIN): RedeemResult {
+  return { ok: true, content, origin, notice: { origin, at }, repeat: false };
+}
+
+/** The winner asking again inside the minute: served again, no second notice. */
+function again(content: string, origin: CodeOrigin | null = ORIGIN): RedeemResult {
+  return { ok: true, content, origin, notice: null, repeat: true };
+}
+
+/** A win on a row with no origin (a legacy file): served, nobody to notify. */
+function servedLegacy(content: string): RedeemResult {
+  return { ok: true, content, origin: null, notice: null, repeat: false };
+}
+
+/** Another customer refused as `redeemed`, counted for the first time, its notice stamped `at`. */
+function refused(at: number): RedeemResult {
+  return { ok: false, reason: 'redeemed', notice: { origin: ORIGIN, at } };
+}
+
+/** A customer refused as `redeemed` already counted (or on a code with no origin): no notice. */
+const REFUSED_QUIET: RedeemResult = { ok: false, reason: 'redeemed', notice: null };
 
 function fixedClock(start = 1000): { now: () => number; tick: (s: number) => void } {
   let t = start;
@@ -50,7 +86,7 @@ test('mint then redeem returns the content', () => {
   const minted = store.mint('defito://base/0xabc', 1000, ORIGIN);
   assert.ok(minted);
   assert.match(minted.code, /^\d{8}$/);
-  assert.deepEqual(store.redeem(minted.code), { ok: true, content: 'defito://base/0xabc', origin: ORIGIN });
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', 1000));
 });
 
 test('expiry is anchored to startedAt, not server now', () => {
@@ -68,14 +104,17 @@ test('mint rejects an already-expired anchor', () => {
   assert.equal(store.mint('defito://base/0xabc', clock.now() - TTL, ORIGIN), null);
 });
 
-test('redeem is single-use: a second redeem reports redeemed', () => {
+test('redeem is single-use: another customer reports redeemed, the winner is served again', () => {
   const clock = fixedClock();
   const store = memStore(clock);
   const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
   assert.ok(minted);
   clock.tick(30);
-  assert.deepEqual(store.redeem(minted.code), { ok: true, content: 'defito://base/0xabc', origin: ORIGIN });
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', clock.now()));
+  assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now() + 1));
+  // The winner's retry (a lost reply, a reload) is not a second use.
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), again('defito://base/0xabc'));
+  assert.deepEqual(store.redeem(minted.code, SECOND), REFUSED_QUIET);
   assert.equal(store.size, 1); // row kept for retention, so it reads redeemed, not a guess
 });
 
@@ -84,15 +123,17 @@ test('a redeemed code reads redeemed inside its minute, then by age like any oth
   const store = memStore(clock);
   const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
   assert.ok(minted);
-  assert.ok(store.redeem(minted.code).ok);
+  assert.ok(store.redeem(minted.code, CUSTOMER).ok);
   clock.tick(TTL - 1);
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
-  clock.tick(1); // at the validity boundary: the later state wins
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
+  assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now()));
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), again('defito://base/0xabc'));
+  clock.tick(1); // at the validity boundary: the later state wins, for the winner too
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'expired' });
+  assert.deepEqual(store.redeem(minted.code, SECOND), { ok: false, reason: 'expired' });
   clock.tick(RETAIN - TTL); // at the answer-window boundary
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'locked' });
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'locked' });
   clock.tick(CODE_REUSE_SECONDS - RETAIN); // at the reuse boundary, before any sweep
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'not-found' });
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'not-found' });
 });
 
 test('a lapsed code stays expired when the clock steps back', () => {
@@ -103,7 +144,7 @@ test('a lapsed code stays expired when the clock steps back', () => {
   clock.tick(TTL);
   store.sweep(); // the 60 s timer is what sees the time pass in production
   clock.tick(-10); // back inside the validity window
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'expired' });
 });
 
 test('an old daily file (uri column, no late columns) is upgraded and keeps its codes, origin unknown', () => {
@@ -119,8 +160,9 @@ test('an old daily file (uri column, no late columns) is upgraded and keeps its 
     old.close();
     const clock = fixedClock();
     const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
-    assert.deepEqual(store.redeem('12345678'), { ok: true, content: 'defito://old', origin: null });
-    assert.deepEqual(store.redeem('12345678'), { ok: false, reason: 'redeemed' });
+    assert.deepEqual(store.redeem('12345678', CUSTOMER), servedLegacy('defito://old'));
+    assert.deepEqual(store.redeem('12345678', CUSTOMER), again('defito://old', null));
+    assert.deepEqual(store.redeem('12345678', SECOND), REFUSED_QUIET);
     store.close();
   });
 });
@@ -133,7 +175,7 @@ test('the live file keeps every invoice, used, lapsed or valid, for debugging', 
     const lapsed = store.mint('defito://lapsed', clock.now(), ORIGIN);
     const valid = store.mint('defito://valid', clock.now() + 1, ORIGIN);
     assert.ok(used && lapsed && valid);
-    assert.ok(store.redeem(used.code).ok);
+    assert.ok(store.redeem(used.code, CUSTOMER).ok);
     clock.tick(TTL); // `lapsed` hits expiry, `valid` has one second left
     store.sweep();
     store.close(); // and a shutdown keeps them for the restart
@@ -150,9 +192,9 @@ test('a consumed code stays consumed when the wall clock steps backward', () => 
   const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
   assert.ok(minted);
   clock.tick(60);
-  assert.ok(store.redeem(minted.code).ok);
+  assert.ok(store.redeem(minted.code, CUSTOMER).ok);
   clock.tick(-30); // NTP correction / VM restore lands before the consume
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
+  assert.deepEqual(store.redeem(minted.code, SECOND), refused(1061));
 });
 
 test('content leaves the db and its -wal log with its row, at the end of the reuse window', () => {
@@ -162,7 +204,7 @@ test('content leaves the db and its -wal log with its row, at the end of the reu
     const sentinel = 'defito://wal-sentinel-0xfeed';
     const minted = store.mint(sentinel, clock.now(), ORIGIN);
     assert.ok(minted);
-    assert.ok(store.redeem(minted.code).ok);
+    assert.ok(store.redeem(minted.code, CUSTOMER).ok);
     clock.tick(CODE_REUSE_SECONDS);
     store.sweep();
     // Store still open: the WAL is live, exactly where a pre-delete frame hid.
@@ -182,7 +224,7 @@ test('past validity but within retention reports expired and KEEPS the row', () 
   assert.ok(minted);
   clock.tick(TTL); // exactly at expiry
   // Reported expired repeatedly - the row survives for the whole retention window.
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'expired' });
   assert.equal(store.size, 1);
 });
 
@@ -192,21 +234,21 @@ test('past the answer window: locked while the row holds its number for the reus
   const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
   assert.ok(minted);
   clock.tick(RETAIN - 1);
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'expired' });
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'expired' });
   clock.tick(1); // at the answer-window boundary
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'locked' });
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'locked' });
   assert.equal(store.size, 1); // still reserved
   clock.tick(CODE_REUSE_SECONDS - RETAIN - 1);
   store.sweep();
   assert.equal(store.size, 1); // one second short of the reuse window
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'locked' });
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'locked' });
   clock.tick(1);
   store.sweep();
   assert.equal(store.size, 0); // end of the reuse window: the number is free again
 });
 
 test('redeem of unknown code reports not-found', () => {
-  assert.deepEqual(memStore().redeem('00000000'), { ok: false, reason: 'not-found' });
+  assert.deepEqual(memStore().redeem('00000000', CUSTOMER), { ok: false, reason: 'not-found' });
 });
 
 test('mint returns null when at capacity', () => {
@@ -259,25 +301,25 @@ test('RotatingCodeStore switches files at the UTC day boundary', () => {
     const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
     const unused = store.mint('defito://unused', clock.now(), ORIGIN);
     assert.ok(minted && unused);
-    assert.deepEqual(store.redeem(minted.code), { ok: true, content: 'defito://base/0xabc', origin: ORIGIN });
+    assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', clock.now()));
     // 24 h later, on the next UTC day: past the answer window, but the 72 h
     // reuse window still holds both numbers, so both are carried over. The
     // redeem is the op that triggers the lazy rotation.
     clock.tick(86_400);
     const day2 = dailyDbPath(base, clock.now());
     assert.notEqual(day2, day1);
-    assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'locked' });
+    assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'locked' });
     assert.equal(store.size, 2);
     // No sweep ran before the roll; retire() alone left the archive with no content.
     assert.deepEqual([...contentOnDisk(day1).values()], ['', '']);
     // 48 h after issue, another day on: still inside the window, carried again.
     clock.tick(86_400);
-    assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'locked' });
+    assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'locked' });
     assert.equal(store.size, 2);
     // Exactly 72 h after issue, on the day after: the reuse window has closed,
     // so the roll (triggered by a redeem, no sweep) carries nothing.
     clock.tick(86_400);
-    assert.deepEqual(store.redeem('00000000'), { ok: false, reason: 'not-found' });
+    assert.deepEqual(store.redeem('00000000', CUSTOMER), { ok: false, reason: 'not-found' });
     assert.equal(store.size, 0);
     store.close();
   } finally {
@@ -298,7 +340,7 @@ test('codes persist across a restart (reopen the same file)', () => {
 
     // Fresh instance over the same file - the prior code is still redeemable.
     const second = new CodeStore(TTL, RETAIN, 100, path, () => now);
-    assert.deepEqual(second.redeem(minted.code), { ok: true, content: 'defito://base/0xabc', origin: ORIGIN });
+    assert.deepEqual(second.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', now));
     second.close();
   });
 });
@@ -316,8 +358,8 @@ test('a code minted just before midnight still redeems after it, once', () => {
     assert.ok(minted);
     clock.tick(40); // 00:00:10 next day, still inside the code's minute
     assert.notEqual(dailyDbPath(base, clock.now()), day1);
-    assert.deepEqual(store.redeem(minted.code), { ok: true, content: 'defito://base/0xabc', origin: ORIGIN });
-    assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
+    assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', clock.now()));
+    assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now() + 1));
     store.close();
     // The archived file kept no invoice; the live copy crossed over.
     assert.deepEqual([...contentOnDisk(day1).values()], ['']);
@@ -340,7 +382,7 @@ test('a restart on a new day carries yesterday\'s reservations, then frees them 
     clock.tick(2 * 3600); // server comes back two hours later, on the next day
     const second = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
     assert.equal(second.size, 1); // the number is still reserved in today's file
-    assert.deepEqual(second.redeem(minted.code), { ok: false, reason: 'locked' });
+    assert.deepEqual(second.redeem(minted.code, CUSTOMER), { ok: false, reason: 'locked' });
     clock.tick(CODE_REUSE_SECONDS - 2 * 3600);
     second.sweep();
     assert.equal(second.size, 0);
@@ -374,8 +416,8 @@ test('a startup carry from a pre-redeemed_at file keeps its codes and wipes the 
     clock.tick(40); // 00:00:10 next day, still inside the code's minute
     const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
     assert.equal(contentOnDisk(day1).get('12345678'), '');
-    assert.deepEqual(store.redeem('12345678'), { ok: true, content: 'defito://old', origin: null });
-    assert.deepEqual(store.redeem('12345678'), { ok: false, reason: 'redeemed' });
+    assert.deepEqual(store.redeem('12345678', CUSTOMER), servedLegacy('defito://old'));
+    assert.deepEqual(store.redeem('12345678', SECOND), REFUSED_QUIET);
     store.close();
   } finally {
     rmDb(day1);
@@ -422,7 +464,7 @@ test('a clock stepping back across midnight stays on today\'s file and keeps its
     assert.ok(minted);
     clock.tick(-60); // NTP steps back to 23:59:10 yesterday
     // Still today's file: the code is live and its invoice intact.
-    assert.deepEqual(store.redeem(minted.code), { ok: true, content: 'defito://today', origin: ORIGIN });
+    assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://today', BEFORE_MIDNIGHT + 40));
     store.close();
     assert.equal(contentOnDisk(day2).get(minted.code), 'defito://today');
   } finally {
@@ -443,16 +485,17 @@ function originsOnDisk(path: string): Map<string, [string | null, string | null]
   return new Map(rows.map((r) => [r.code, [r.merchant_pubkey, r.request_event]]));
 }
 
-test('a redeem returns who asked for the code; a refused one does not', () => {
+test('a redeem returns who asked for the code, again on the winner\'s retry', () => {
   const clock = fixedClock();
   const store = memStore(clock);
   const other: CodeOrigin = { merchantPubkey: 'c'.repeat(64), requestEvent: 'd'.repeat(64) };
   const mine = store.mint('defito://mine', clock.now(), ORIGIN);
   const theirs = store.mint('defito://theirs', clock.now(), other);
   assert.ok(mine && theirs);
-  assert.deepEqual(store.redeem(theirs.code), { ok: true, content: 'defito://theirs', origin: other });
-  assert.deepEqual(store.redeem(mine.code), { ok: true, content: 'defito://mine', origin: ORIGIN });
-  assert.deepEqual(store.redeem(mine.code), { ok: false, reason: 'redeemed' });
+  assert.deepEqual(store.redeem(theirs.code, CUSTOMER), served('defito://theirs', clock.now(), other));
+  assert.deepEqual(store.redeem(mine.code, CUSTOMER), served('defito://mine', clock.now()));
+  assert.deepEqual(store.redeem(mine.code, CUSTOMER), again('defito://mine'));
+  assert.deepEqual(store.redeem(theirs.code, CUSTOMER), again('defito://theirs', other));
 });
 
 test('rotation wipes each archived code\'s origin along with its invoice', () => {
@@ -465,7 +508,7 @@ test('rotation wipes each archived code\'s origin along with its invoice', () =>
     assert.ok(minted);
     clock.tick(40); // next UTC day, inside the code's minute
     // The live copy crossed over with its origin; the archive kept neither.
-    assert.deepEqual(store.redeem(minted.code), { ok: true, content: 'defito://base/0xabc', origin: ORIGIN });
+    assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', clock.now()));
     store.close();
     assert.deepEqual(originsOnDisk(day1).get(minted.code), [null, null]);
   } finally {
@@ -498,8 +541,9 @@ test('a code for empty content redeems once, like any other', () => {
   const store = memStore(clock);
   const minted = store.mint('', clock.now(), ORIGIN);
   assert.ok(minted);
-  assert.deepEqual(store.redeem(minted.code), { ok: true, content: '', origin: ORIGIN });
-  assert.deepEqual(store.redeem(minted.code), { ok: false, reason: 'redeemed' });
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('', clock.now()));
+  assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now() + 1));
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), again(''));
 });
 
 test('a wiped row (no invoice, no origin) is never served, even inside its minute', () => {
@@ -513,7 +557,7 @@ test('a wiped row (no invoice, no origin) is never served, even inside its minut
     db.exec("UPDATE codes SET content = '', merchant_pubkey = NULL, request_event = NULL");
     db.close();
     const reopened = new CodeStore(TTL, RETAIN, 100, path, clock.now);
-    assert.deepEqual(reopened.redeem(minted.code), { ok: false, reason: 'expired' });
+    assert.deepEqual(reopened.redeem(minted.code, CUSTOMER), { ok: false, reason: 'expired' });
     reopened.close();
   });
 });
@@ -541,7 +585,7 @@ test('a carry from the last pre-rename schema (uri plus origin) keeps the origin
 
     clock.tick(40); // 00:00:10 next day, still inside the code's minute
     const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
-    assert.deepEqual(store.redeem('12345678'), { ok: true, content: 'defito://old', origin: ORIGIN });
+    assert.deepEqual(store.redeem('12345678', CUSTOMER), served('defito://old', clock.now()));
     store.close();
     // The startup scrub upgraded yesterday's file and wiped it.
     assert.equal(contentOnDisk(day1).get('12345678'), '');
@@ -600,13 +644,16 @@ test('a code redeemed in a later day file stays redeemed when an older copy is c
     const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
     assert.ok(minted);
     clock.tick(40); // next day: carried into day2
-    assert.ok(store.redeem(minted.code).ok); // redeemed in day2 only
+    assert.ok(store.redeem(minted.code, CUSTOMER).ok); // redeemed in day2 only
     store.close();
     // day1 was retired with a stale, unredeemed copy. Restart a day later: both
     // day1 and day2 are inside the window, and day2's redeemed state must win.
     clock.tick(86_400);
     new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now).close();
-    assert.notEqual(redeemedAtOnDisk(dailyDbPath(base, clock.now()), minted.code), null);
+    assert.deepEqual(redeemedOnDisk(dailyDbPath(base, clock.now()), minted.code), {
+      at: BEFORE_MIDNIGHT + 40,
+      by: CUSTOMER,
+    });
   } finally {
     rmDb(day1);
     rmDb(day2);
@@ -614,14 +661,14 @@ test('a code redeemed in a later day file stays redeemed when an older copy is c
   }
 });
 
-/** A row's `redeemed_at`, read straight from the file (store closed). */
-function redeemedAtOnDisk(path: string, code: string): number | null {
+/** When a row was redeemed and by whom, read straight from the file (store closed). */
+function redeemedOnDisk(path: string, code: string): { at: number | null; by: string | null } {
   const db = new DatabaseSync(path);
   try {
-    const row = db.prepare('SELECT redeemed_at FROM codes WHERE code = ?').get(code) as
-      | { redeemed_at: number | null }
+    const row = db.prepare('SELECT redeemed_at, redeemed_by FROM codes WHERE code = ?').get(code) as
+      | { redeemed_at: number | null; redeemed_by: string | null }
       | undefined;
-    return row?.redeemed_at ?? null;
+    return { at: row?.redeemed_at ?? null, by: row?.redeemed_by ?? null };
   } finally {
     db.close();
   }
@@ -639,11 +686,162 @@ test('a redeem recorded in any carried copy wins, whatever order the copies land
     assert.ok(minted);
     const today = new CodeStore(TTL, RETAIN, 100, path, clock.now);
     today.carryFrom(source); // stale copy
-    assert.ok(src.redeem(minted.code).ok);
+    assert.ok(src.redeem(minted.code, CUSTOMER).ok);
     src.close();
-    today.carryFrom(source); // same code again, now redeemed
-    assert.deepEqual(today.redeem(minted.code), { ok: false, reason: 'redeemed' });
+    today.carryFrom(source); // same code again, now redeemed, its winner with it
+    assert.deepEqual(today.redeem(minted.code, SECOND), refused(at + 1));
+    assert.deepEqual(today.redeem(minted.code, CUSTOMER), again('defito://base/0xabc'));
     today.close();
     rmDb(source);
   });
+});
+
+/** Every counted customer as `code:pubkey`, lowest notice first, read straight from the file (store closed). */
+function redeemersOnDisk(path: string): string[] {
+  const db = new DatabaseSync(path);
+  try {
+    const rows = db.prepare('SELECT code, pubkey FROM redeemers ORDER BY notice_at').all() as {
+      code: string;
+      pubkey: string;
+    }[];
+    return rows.map((r) => `${r.code}:${r.pubkey}`);
+  } finally {
+    db.close();
+  }
+}
+
+test('each distinct customer inside the minute gets one notice, the winner stamped first', () => {
+  const clock = fixedClock();
+  const store = memStore(clock);
+  const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
+  assert.ok(minted);
+  clock.tick(5);
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', 1005));
+  // Same second: refused, but stamped a second after the winner so the two never tie.
+  assert.deepEqual(store.redeem(minted.code, SECOND), refused(1006));
+  assert.deepEqual(store.redeem(minted.code, THIRD), refused(1007));
+  // Past the last stamp: stamped at its own time.
+  clock.tick(20);
+  assert.deepEqual(store.redeem(minted.code, FOURTH), refused(1025));
+  // A refused customer already counted is refused again with no second notice;
+  // the winner is served again, with none either.
+  for (const pubkey of [SECOND, THIRD, FOURTH]) {
+    assert.deepEqual(store.redeem(minted.code, pubkey), REFUSED_QUIET, pubkey);
+  }
+  assert.deepEqual(store.redeem(minted.code, CUSTOMER), again('defito://base/0xabc'));
+});
+
+test('notices are counted per code: another code\'s customers do not shift the stamps', () => {
+  const clock = fixedClock();
+  const store = memStore(clock);
+  const first = store.mint('defito://first', clock.now(), ORIGIN);
+  const second = store.mint('defito://second', clock.now(), ORIGIN);
+  assert.ok(first && second);
+  assert.deepEqual(store.redeem(first.code, CUSTOMER), served('defito://first', 1000));
+  assert.deepEqual(store.redeem(first.code, SECOND), refused(1001));
+  // The same two customers on the other code, in the other order, same second.
+  assert.deepEqual(store.redeem(second.code, SECOND), served('defito://second', 1000));
+  assert.deepEqual(store.redeem(second.code, CUSTOMER), refused(1001));
+});
+
+test('a customer past the minute, or on an unknown code, is neither served nor counted', () => {
+  withTempDb('redeemers-late', (path) => {
+    const clock = fixedClock();
+    const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+    const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
+    assert.ok(minted);
+    assert.deepEqual(store.redeem('00000000', CUSTOMER), { ok: false, reason: 'not-found' });
+    clock.tick(TTL);
+    assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'expired' });
+    clock.tick(RETAIN);
+    assert.deepEqual(store.redeem(minted.code, SECOND), { ok: false, reason: 'locked' });
+    store.close();
+    assert.deepEqual(redeemersOnDisk(path), []);
+  });
+});
+
+test('a legacy code with no origin is served but counts nobody, having no merchant to notify', () => {
+  withTempDb('redeemers-legacy', (path) => {
+    const old = new DatabaseSync(path);
+    old.exec(`
+      CREATE TABLE codes (
+        code TEXT PRIMARY KEY, uri TEXT NOT NULL, created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL, retain_until INTEGER NOT NULL
+      );
+      INSERT INTO codes VALUES ('12345678', 'defito://old', 1000, ${1000 + TTL}, ${1000 + RETAIN});
+    `);
+    old.close();
+    const store = new CodeStore(TTL, RETAIN, 100, path, fixedClock().now);
+    assert.deepEqual(store.redeem('12345678', CUSTOMER), servedLegacy('defito://old'));
+    assert.deepEqual(store.redeem('12345678', SECOND), REFUSED_QUIET);
+    store.close();
+    assert.deepEqual(redeemersOnDisk(path), []);
+  });
+});
+
+test('redeemers leave with their code at the end of the reuse window, so a reissued number starts clean', () => {
+  withTempDb('redeemers-purge', (path) => {
+    const clock = fixedClock();
+    const store = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+    const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
+    assert.ok(minted);
+    assert.ok(store.redeem(minted.code, CUSTOMER).ok);
+    assert.deepEqual(store.redeem(minted.code, SECOND), refused(1001));
+    clock.tick(CODE_REUSE_SECONDS - 1);
+    store.sweep();
+    store.close();
+    assert.equal(redeemersOnDisk(path).length, 2); // one second short: still held
+    const reopened = new CodeStore(TTL, RETAIN, 100, path, clock.now);
+    clock.tick(1);
+    reopened.sweep();
+    reopened.close();
+    assert.deepEqual(redeemersOnDisk(path), []);
+  });
+});
+
+test('a customer counted before midnight is not counted again after it, and the archive keeps no pubkey', () => {
+  const clock = fixedClock(BEFORE_MIDNIGHT);
+  const base = join(tmpdir(), `regby-redeemers-carry-${process.pid}.db`);
+  const day1 = dailyDbPath(base, clock.now());
+  try {
+    const store = new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now);
+    const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
+    assert.ok(minted);
+    clock.tick(5);
+    assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', BEFORE_MIDNIGHT + 5));
+    assert.deepEqual(store.redeem(minted.code, SECOND), refused(BEFORE_MIDNIGHT + 6));
+    clock.tick(35); // 00:00:10 next day, still inside the code's minute
+    assert.notEqual(dailyDbPath(base, clock.now()), day1);
+    assert.deepEqual(store.redeem(minted.code, CUSTOMER), again('defito://base/0xabc'));
+    assert.deepEqual(store.redeem(minted.code, SECOND), REFUSED_QUIET);
+    assert.deepEqual(store.redeem(minted.code, THIRD), refused(BEFORE_MIDNIGHT + 40));
+    store.close();
+    assert.deepEqual(redeemersOnDisk(day1), []);
+    assert.deepEqual(redeemedOnDisk(day1, minted.code), { at: BEFORE_MIDNIGHT + 5, by: null });
+  } finally {
+    rmDb(day1);
+    rmDb(dailyDbPath(base, clock.now()));
+  }
+});
+
+test('a startup scrub wipes redeemers from an archive no roll retired', () => {
+  const clock = fixedClock(BEFORE_MIDNIGHT);
+  const base = join(tmpdir(), `regby-redeemers-scrub-${process.pid}.db`);
+  const day1 = dailyDbPath(base, clock.now());
+  try {
+    const day = new CodeStore(TTL, RETAIN, 100, day1, clock.now);
+    const minted = day.mint('defito://left', clock.now(), ORIGIN);
+    assert.ok(minted);
+    assert.ok(day.redeem(minted.code, CUSTOMER).ok);
+    day.close();
+    assert.deepEqual(redeemersOnDisk(day1), [`${minted.code}:${CUSTOMER}`]);
+    assert.equal(redeemedOnDisk(day1, minted.code).by, CUSTOMER);
+    clock.tick(2 * CODE_REUSE_SECONDS); // back two days later: nothing to carry
+    new RotatingCodeStore(TTL, RETAIN, 100, base, clock.now).close();
+    assert.deepEqual(redeemersOnDisk(day1), []);
+    assert.equal(redeemedOnDisk(day1, minted.code).by, null);
+  } finally {
+    rmDb(day1);
+    rmDb(dailyDbPath(base, clock.now()));
+  }
 });

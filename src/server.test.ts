@@ -4,13 +4,14 @@ import type { Event } from 'nostr-tools';
 import { ReGBYBroker } from './server.ts';
 import { CodeStore } from './store.ts';
 import type { Config } from './config.ts';
-import type { ReGBYTransport, ReplyTarget } from './nostr.ts';
+import type { ReGBYTransport, ReplyOptions, ReplyTarget } from './nostr.ts';
 import type { AuditEntry, AuditSink } from './audit-sender.ts';
-import { CODE_TAG, FROM_TAG, TO_TAG, type OutboundIntent } from './protocol.ts';
+import { CODE_TAG, CONFLICT_WARNING, FROM_TAG, TO_TAG, type OutboundIntent } from './protocol.ts';
 
 const BROKER = 'f'.repeat(64);
 const MERCHANT = 'a'.repeat(64);
 const CUSTOMER = 'c'.repeat(64);
+const SECOND_CUSTOMER = 'd'.repeat(64);
 const INVOICE =
   'defito://base/0xabc&amount=USDT:1&order_id=9f2c14ab7e5d4083b6a1cc90de3f7721' +
   '&valid_until=1795219200&nostr=npub1e2yuky03caw4ke3zy68lg0fz3r4gkt94hx4fjmlelacyljgyk79svn3eef';
@@ -20,11 +21,15 @@ interface SentReply {
   intent: OutboundIntent;
   content: string;
   extraTags: readonly string[][];
+  /** Only when the broker set it; otherwise the transport stamps publish time. */
+  createdAt?: number;
 }
 
 /** Content arrives as plaintext: `decrypt` is the identity, so tests speak the protocol directly. */
 class FakeTransport implements ReGBYTransport {
   readonly sent: SentReply[] = [];
+  /** Who the broker decrypted content from, in order. */
+  readonly decryptedFrom: string[] = [];
   /** Per-recipient delivery outcome; unlisted recipients succeed. */
   readonly deliveredTo = new Map<string, boolean>();
   private onEvent: ((event: Event) => void) | null = null;
@@ -38,13 +43,14 @@ class FakeTransport implements ReGBYTransport {
     target: ReplyTarget,
     intent: OutboundIntent,
     content: string,
-    extraTags: readonly string[][] = [],
+    { extraTags = [], createdAt }: ReplyOptions = {},
   ): Promise<boolean> {
-    this.sent.push({ target, intent, content, extraTags });
+    this.sent.push({ target, intent, content, extraTags, ...(createdAt === undefined ? {} : { createdAt }) });
     return this.deliveredTo.get(target.recipientPubkey) ?? true;
   }
 
-  decrypt(_sender: string, content: string): string {
+  decrypt(sender: string, content: string): string {
+    this.decryptedFrom.push(sender);
     return content;
   }
 
@@ -77,6 +83,11 @@ class FakeTransport implements ReGBYTransport {
     // Every await in the broker resolves through this fake's promises, which
     // are all microtasks; one macrotask tick drains them.
     await new Promise((r) => setImmediate(r));
+  }
+
+  /** A customer's redeem (event 3) as the protocol sends it: empty content, code in its tag. */
+  redeem(id: string, pubkey: string, code: string): Promise<void> {
+    return this.inbound(id, pubkey, 'request_regby_content', '', [[CODE_TAG, code]]);
   }
 }
 
@@ -111,6 +122,16 @@ const CONFIG: Config = {
   logLevel: 'error',
 };
 
+/**
+ * The store's clock: real now, plus an offset a test may move. The merchant's
+ * `created_at` (real now) anchors each code, so a fixed clock still mints.
+ */
+function storeClock(): { now: () => number; at: number; advance: (s: number) => void } {
+  const at = Math.floor(Date.now() / 1000);
+  let offset = 0;
+  return { now: () => at + offset, at, advance: (s) => (offset += s) };
+}
+
 async function withBroker(
   fn: (transport: FakeTransport, audit: MemoryAudit) => Promise<void>,
   clock?: () => number,
@@ -133,18 +154,26 @@ async function withBroker(
   }
 }
 
-/** Mint as the merchant (event 1), returning the issued code (event 2). */
+/**
+ * Mint as the merchant (event 1) and return the issued code. Event 2 carries
+ * the merchant's own content back; the code is only in its tag.
+ */
 async function mint(transport: FakeTransport, content = INVOICE): Promise<string> {
   await transport.inbound('1', MERCHANT, 'request_regby_code', content);
   const reply = transport.sent.at(-1);
-  assert.ok(reply && /^\d{8}$/.test(reply.content), 'no code issued');
-  return reply.content;
+  assert.equal(reply?.intent, 'regby_code', 'no code issued');
+  assert.equal(reply.content, content);
+  const code = reply.extraTags.find((t) => t[0] === CODE_TAG)?.[1];
+  assert.ok(code && /^\d{8}$/.test(code), 'no code tag');
+  assert.deepEqual(reply.extraTags, [[CODE_TAG, code]]);
+  return code;
 }
 
-test('a redeem names the merchant to the customer and notifies the merchant', async () => {
+test('a redeem names the merchant to the customer and notifies the merchant with the content', async () => {
+  const clock = storeClock();
   await withBroker(async (transport, audit) => {
     const code = await mint(transport);
-    await transport.inbound('3', CUSTOMER, 'request_regby_content', code);
+    await transport.redeem('3', CUSTOMER, code);
 
     const [, toCustomer, toMerchant] = transport.sent;
     // Event 4: the invoice, tagged with who it is from.
@@ -154,36 +183,41 @@ test('a redeem names the merchant to the customer and notifies the merchant', as
       content: INVOICE,
       extraTags: [[CODE_TAG, code], [FROM_TAG, MERCHANT]],
     });
-    // Event 5: the code back to the merchant, on their own request's thread.
+    // Event 5: the same invoice to the merchant, on their own request's
+    // thread, stamped when the store counted the customer.
     assert.deepEqual(toMerchant, {
       target: { recipientPubkey: MERCHANT, requestEventId: '1'.repeat(64) },
       intent: 'regby_content_delivered',
-      content: code,
+      content: INVOICE,
       extraTags: [[CODE_TAG, code], [TO_TAG, CUSTOMER]],
+      createdAt: clock.at,
     });
     assert.deepEqual(
-      audit.entries.map((e) => [e.event, e.pubkey, e.delivered]),
+      audit.entries.map((e) => [e.event, e.pubkey, e.content, e.delivered]),
       [
-        ['code_issued', MERCHANT, true],
-        ['redeem', CUSTOMER, true],
-        ['merchant_notified', MERCHANT, true],
+        ['code_issued', MERCHANT, INVOICE, true],
+        ['redeem', CUSTOMER, INVOICE, true],
+        ['merchant_notified', MERCHANT, INVOICE, true],
       ],
     );
-  });
+  }, clock.now);
 });
 
-test('requests need no code tag, and one a client sends is ignored', async () => {
+test('a redeem is read from its code tag alone and never decrypted', async () => {
   await withBroker(async (transport) => {
-    // A stray tag on the mint changes nothing: a code is still issued.
+    // A stray tag on the mint changes nothing: the real code is issued and tagged.
     await transport.inbound('1', MERCHANT, 'request_regby_code', INVOICE, [[CODE_TAG, '00000000']]);
-    const code = transport.sent.at(-1)?.content;
-    assert.ok(code && /^\d{8}$/.test(code), 'no code issued');
-    // The redeem names the real code only in its content; a tag naming
-    // another code must neither be redeemed nor block the real one.
-    await transport.inbound('3', CUSTOMER, 'request_regby_content', code, [[CODE_TAG, '12345678']]);
+    const code = transport.sent.at(-1)?.extraTags.find((t) => t[0] === CODE_TAG)?.[1];
+    assert.ok(code && code !== '00000000' && /^\d{8}$/.test(code), 'no code issued');
+    // The code in content with no tag, as old app builds sent it: dropped, no reply.
+    await transport.inbound('2', CUSTOMER, 'request_regby_content', code);
+    assert.equal(transport.sent.length, 1);
+    // The tag is what counts; whatever the content holds is ignored.
+    await transport.inbound('3', CUSTOMER, 'request_regby_content', '12345678', [[CODE_TAG, code]]);
     const reply = transport.sent.find((s) => s.intent === 'regby_content');
     assert.equal(reply?.content, INVOICE);
     assert.deepEqual(reply?.extraTags, [[CODE_TAG, code], [FROM_TAG, MERCHANT]]);
+    assert.deepEqual(transport.decryptedFrom, [MERCHANT]);
   });
 });
 
@@ -191,7 +225,7 @@ test('the merchant is notified even when the customer\'s reply reached no relay'
   await withBroker(async (transport, audit) => {
     const code = await mint(transport);
     transport.deliveredTo.set(CUSTOMER, false);
-    await transport.inbound('3', CUSTOMER, 'request_regby_content', code);
+    await transport.redeem('3', CUSTOMER, code);
     assert.deepEqual(
       transport.sent.map((r) => r.intent),
       ['regby_code', 'regby_content', 'regby_content_delivered'],
@@ -201,29 +235,107 @@ test('the merchant is notified even when the customer\'s reply reached no relay'
   });
 });
 
-test('a refused redeem notifies no one and tags only the code', async () => {
+test('a second customer inside the minute gets a conflict, and so does the merchant', async () => {
+  const clock = storeClock();
+  await withBroker(async (transport, audit) => {
+    const code = await mint(transport);
+    await transport.redeem('3', CUSTOMER, code);
+    await transport.redeem('4', SECOND_CUSTOMER, code); // same second
+    // The refused customer is told why, not handed an empty error.
+    const refusal = transport.sent.find((r) => r.target.recipientPubkey === SECOND_CUSTOMER);
+    assert.deepEqual(refusal, {
+      target: { recipientPubkey: SECOND_CUSTOMER, requestEventId: '4'.repeat(64) },
+      intent: 'regby_conflict',
+      content: CONFLICT_WARNING,
+      extraTags: [[CODE_TAG, code]],
+    });
+    // The winner's notice echoes the content; the conflict carries the warning
+    // instead. The stamps keep the order the customers arrived in.
+    const notices = transport.sent.filter((r) => r.target.recipientPubkey === MERCHANT && r.intent !== 'regby_code');
+    assert.deepEqual(
+      notices.map((r) => [r.intent, r.target.requestEventId, r.content, r.extraTags, r.createdAt]),
+      [
+        ['regby_content_delivered', '1'.repeat(64), INVOICE, [[CODE_TAG, code], [TO_TAG, CUSTOMER]], clock.at],
+        ['regby_conflict', '1'.repeat(64), CONFLICT_WARNING, [[CODE_TAG, code], [TO_TAG, SECOND_CUSTOMER]], clock.at + 1],
+      ],
+    );
+    // Only the merchant's own text is recorded as content; the fixed warning is not.
+    assert.deepEqual(
+      audit.entries.map((e) => [e.event, e.pubkey, e.reason, e.content]),
+      [
+        ['code_issued', MERCHANT, undefined, INVOICE],
+        ['redeem', CUSTOMER, undefined, INVOICE],
+        ['merchant_notified', MERCHANT, undefined, INVOICE],
+        ['redeem_refused', SECOND_CUSTOMER, 'redeemed', undefined],
+        ['merchant_notified', MERCHANT, 'conflict', undefined],
+      ],
+    );
+  }, clock.now);
+});
+
+test('the winner asking again is served again; a refused customer is refused again; no second notices', async () => {
+  await withBroker(async (transport, audit) => {
+    const code = await mint(transport);
+    await transport.redeem('3', CUSTOMER, code);
+    await transport.redeem('4', SECOND_CUSTOMER, code);
+    await transport.redeem('5', CUSTOMER, code); // the winner again
+    await transport.redeem('6', SECOND_CUSTOMER, code); // the refused one again
+    const answer = (id: string) => transport.sent.find((r) => r.target.requestEventId === id.repeat(64));
+    assert.deepEqual(answer('5'), {
+      target: { recipientPubkey: CUSTOMER, requestEventId: '5'.repeat(64) },
+      intent: 'regby_content',
+      content: INVOICE,
+      extraTags: [[CODE_TAG, code], [FROM_TAG, MERCHANT]],
+    });
+    assert.equal(answer('6')?.intent, 'regby_conflict');
+    assert.deepEqual(
+      transport.sent.filter((r) => r.target.recipientPubkey === MERCHANT && r.intent !== 'regby_code').map((r) => r.intent),
+      ['regby_content_delivered', 'regby_conflict'],
+    );
+    const redeems = audit.entries.filter((e) => e.event === 'redeem');
+    assert.deepEqual(
+      redeems.map((e) => [e.requestEvent, e.reason]),
+      [
+        ['3'.repeat(64), undefined],
+        ['5'.repeat(64), 'repeat'],
+      ],
+    );
+  });
+});
+
+test('the winner asking again past the minute is refused as expired', async () => {
+  const clock = storeClock();
   await withBroker(async (transport) => {
     const code = await mint(transport);
-    await transport.inbound('3', CUSTOMER, 'request_regby_content', code);
-    await transport.inbound('5', CUSTOMER, 'request_regby_content', code); // already redeemed
-    const refusal = transport.sent.at(-1);
-    assert.equal(refusal?.intent, 'regby_code_already_redeemed');
-    assert.equal(refusal?.content, '');
-    assert.deepEqual(refusal?.extraTags, [[CODE_TAG, code]]);
+    await transport.redeem('3', CUSTOMER, code);
+    clock.advance(CONFIG.codeTtlSeconds + CONFIG.clockSkewSeconds);
+    await transport.redeem('4', CUSTOMER, code);
+    assert.equal(transport.sent.at(-1)?.intent, 'regby_code_expired');
+  }, clock.now);
+});
+
+test('a customer past the minute is refused and the merchant hears nothing', async () => {
+  const clock = storeClock();
+  await withBroker(async (transport) => {
+    const code = await mint(transport);
+    await transport.redeem('3', CUSTOMER, code);
+    clock.advance(CONFIG.codeTtlSeconds + CONFIG.clockSkewSeconds);
+    await transport.redeem('4', SECOND_CUSTOMER, code);
+    assert.equal(transport.sent.at(-1)?.intent, 'regby_code_expired');
     assert.equal(transport.sent.filter((r) => r.intent === 'regby_content_delivered').length, 1);
-  });
+  }, clock.now);
 });
 
 test('empty content runs the same five events, pairing the peers', async () => {
   await withBroker(async (transport, audit) => {
     const code = await mint(transport, '');
-    await transport.inbound('3', CUSTOMER, 'request_regby_content', code);
+    await transport.redeem('3', CUSTOMER, code);
     assert.deepEqual(
       transport.sent.map((r) => [r.intent, r.content, r.extraTags]),
       [
-        ['regby_code', code, [[CODE_TAG, code]]],
+        ['regby_code', '', [[CODE_TAG, code]]],
         ['regby_content', '', [[CODE_TAG, code], [FROM_TAG, MERCHANT]]],
-        ['regby_content_delivered', code, [[CODE_TAG, code], [TO_TAG, CUSTOMER]]],
+        ['regby_content_delivered', '', [[CODE_TAG, code], [TO_TAG, CUSTOMER]]],
       ],
     );
     assert.deepEqual(
@@ -235,7 +347,7 @@ test('empty content runs the same five events, pairing the peers', async () => {
 
 test('an unknown code is refused as not found, with empty content', async () => {
   await withBroker(async (transport) => {
-    await transport.inbound('3', CUSTOMER, 'request_regby_content', '12345678');
+    await transport.redeem('3', CUSTOMER, '12345678');
     assert.deepEqual(
       transport.sent.map((r) => [r.intent, r.content, r.extraTags]),
       [['regby_code_not_found', '', [[CODE_TAG, '12345678']]]],
@@ -245,18 +357,18 @@ test('an unknown code is refused as not found, with empty content', async () => 
 
 test('a locked code is refused with empty content and counts as a guess', async () => {
   // The store's clock only: the merchant's `created_at` (real now) anchors the
-  // code, and moving the store past the answer window makes it locked.
-  let offset = 0;
-  const clock = (): number => Math.floor(Date.now() / 1000) + offset;
+  // code, and moving the store past the answer window makes it locked. The
+  // skew covers a real second ticking over between the clock and the mint.
+  const clock = storeClock();
   await withBroker(async (transport, audit) => {
     const code = await mint(transport);
-    offset = CONFIG.codeRetainSeconds;
+    clock.advance(CONFIG.codeRetainSeconds + CONFIG.clockSkewSeconds);
     for (let i = 0; i <= CONFIG.redeemFailMax; i++) {
-      await transport.inbound(`l${i}`, CUSTOMER, 'request_regby_content', code);
+      await transport.redeem(`l${i}`, CUSTOMER, code);
     }
     const refusals = transport.sent.slice(1);
     assert.equal(refusals.length, CONFIG.redeemFailMax);
     for (const r of refusals) assert.deepEqual([r.intent, r.content, r.extraTags], ['regby_code_locked', '', [[CODE_TAG, code]]]);
     assert.equal(audit.entries.at(-1)?.event, 'blacklisted');
-  }, clock);
+  }, clock.now);
 });

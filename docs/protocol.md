@@ -2,10 +2,10 @@
 
 ReGBY is a **transport**. A merchant encrypts any text to the broker's npub
 (a `defito://` payment request, anything else, or nothing at all). The broker
-never reads it: it mints an 8-digit code and returns it. A customer redeems
-the code; the broker returns the original content, then **pairs the two
-peers**: the customer learns who the content came from (`from`), the merchant
-who received it (`to`).
+never reads it: it mints an 8-digit code and returns it, tagged on the
+merchant's own content. A customer redeems the code; the broker returns the
+original content, then **pairs the two peers**: the customer learns who the
+content came from (`from`), the merchant who received it (`to`).
 
 A `defifrom://` payment confirmation never passes through here. It goes
 straight to the npub named in the invoice it answers. The broker exists to fit
@@ -22,8 +22,9 @@ Public spec, for client implementers: [spec.md](spec.md).
 
 Every message is a Nostr **DM, kind 4**, with NIP-04 encrypted `content`.
 
-- **Content** is the raw value, no JSON wrapper: the merchant's text (up to
-  4096 characters, empty included) or a bare eight-digit code.
+- **Content** is the merchant's raw text, no JSON wrapper (up to 4096
+  characters, empty included). It is never the code. The redeem request and
+  every failure carry `""`.
 - **Empty content is never encrypted**, in either direction. A failure reply,
   a success carrying empty content, and an empty request all travel as a raw
   `""`. A receiver checks for `""` before it decrypts.
@@ -37,11 +38,11 @@ Every message is a Nostr **DM, kind 4**, with NIP-04 encrypted `content`.
   minute). Relay housekeeping only; it says nothing about code validity.
 - Every published event also carries `["client", "regby-middleware"]`: the DM
   relays reject writes without a `client` tag.
-- **Code** rides plaintext `["regby_code", <code>]` on every reply about one
-  (all but `regby_code_busy`, where none was minted). It is optional for
-  clients: a request needs no such tag, the broker ignores one if sent (the
-  code is read from the content only), and a client may ignore it on replies,
-  since `e` stays the linkage; see
+- **Code** rides only in the plaintext `["regby_code", <code>]` tag: on every
+  reply about one (all but `regby_code_busy`, where none was minted), where the
+  merchant reads it from `regby_code`, and on `request_regby_content`, where it
+  is required and is the only place the broker reads the code from. A tag on
+  `request_regby_code` is ignored. See
   [Pairing and code tags are plaintext](#pairing-and-code-tags-are-plaintext).
 
 NIP-04 is required on this kind because it is what every client reading these
@@ -55,22 +56,25 @@ signature, so intents and pairing tags are authenticated too.
 | direction | `i` tag | content (decrypted) | extra tags |
 | --- | --- | --- | --- |
 | merchant to broker | `request_regby_code` | any text, e.g. `defito://...` | |
-| broker to merchant | `regby_code` | the code, e.g. `42891337` | `regby_code` |
-| customer to broker | `request_regby_content` | the code | |
+| broker to merchant | `regby_code` | the merchant's text, sent back | `regby_code` = the code, e.g. `42891337` |
+| customer to broker | `request_regby_content` | `""` | `regby_code` = the code (required) |
 | broker to customer | `regby_content` | the merchant's text | `regby_code`; `from` = merchant hex pubkey |
-| broker to merchant | `regby_content_delivered` | the code | `regby_code`; `to` = customer hex pubkey; `e` = the merchant's original request |
+| broker to merchant | `regby_content_delivered` | the merchant's text, as the customer received it | `regby_code`; `to` = customer hex pubkey; `e` = the merchant's original request. Once per code |
+| broker to merchant | `regby_conflict` | the conflict warning, `This ReGBY code was already redeemed by another npub.` | `regby_code`; `to` = a customer refused after the redeem; `e` = the merchant's original request. One per such customer, see [Redeeming](#redeeming-request_regby_content) |
 
 ### Failures
 
 A failure has its own intent, empty content and no pairing tag. There is no
 free error text, so the untrusted broker has no channel into the app's UI.
+The one exception is `regby_conflict`, which carries the fixed conflict
+warning; apps show their own warning for the intent, not the broker's words.
 Because a success can carry empty content too, **clients read the intent
 first**, never the content.
 
 | intent | answers | when |
 | --- | --- | --- |
 | `regby_code_busy` | `request_regby_code` | No free code: `REGBY_STORE_MAX` codes issued in the last 72 h. |
-| `regby_code_already_redeemed` | `request_regby_content` | The code was used and is still inside its minute. |
+| `regby_conflict` | `request_regby_content` | The code was used by **another** pubkey and is still inside its minute. Content: the conflict warning. Apps MUST show it as a warning (see [Redeeming](#redeeming-request_regby_content)). |
 | `regby_code_expired` | `request_regby_content` | Past its minute, used or not, under `REGBY_CODE_RETAIN_SECONDS` (1 h) old. |
 | `regby_code_locked` | `request_regby_content` | 1 h to 72 h old; the number is held back from reuse. |
 | `regby_code_not_found` | `request_regby_content` | Never issued, or over 72 h old. |
@@ -102,7 +106,9 @@ Who can still read them:
 
 `regby_content_delivered` is sent whether or not the customer's reply reached
 a relay: the code is used up either way, so "delivered" means released by the
-broker, not received by the customer.
+broker, not received by the customer. Each other customer who sent the code
+inside its minute and was refused gets the merchant a `regby_conflict` naming
+them (see [Redeeming](#redeeming-request_regby_content)).
 
 ## Behaviour
 
@@ -116,7 +122,8 @@ broker, not received by the customer.
    `REGBY_CLOCK_SKEW_SECONDS`.
 3. Store `code -> { content, expires_at, retain_until, merchant, request event }`,
    content verbatim (not trimmed).
-4. Reply `regby_code` with the code.
+4. Reply `regby_code` with the merchant's content sent back and the code in
+   the `regby_code` tag.
 
 **Validity is anchored to the request's `created_at`**, not to when the broker
 received it, so the POS and the broker count down from the same instant. The
@@ -129,27 +136,54 @@ recipient's job. What the app must check now that the broker checks nothing:
 
 ### Redeeming (`request_regby_content`)
 
-The content must be exactly eight digits after trimming, otherwise the event
-is dropped. Then:
+The code is read from the first `regby_code` tag and must be exactly eight
+digits after trimming, otherwise the event is dropped. The content is ignored
+and never decrypted. Then:
 
-- **Valid and unused**: the code is consumed, the customer gets
-  `regby_content` (with `from`), and the merchant gets
-  `regby_content_delivered` (with `to`).
+- **Valid and unused**: the code is consumed (`redeemed_at`, and the
+  customer in `redeemed_by`), the customer gets `regby_content` (with
+  `from`), and the merchant gets `regby_content_delivered` (with `to`).
+- **Valid and used by this same pubkey**: `regby_content` again, and no
+  further notice. Only inside the minute.
 - **Otherwise** the code is in exactly one state, decided by its age from the
   merchant's request. Each later state overrides the earlier, so a used code
   reads `expired` once its minute is over:
 
   | age | reply |
   | --- | --- |
-  | under 1 min, already used | `regby_code_already_redeemed` |
+  | under 1 min, used by another pubkey | `regby_conflict` |
   | 1 min to 1 h, used or not | `regby_code_expired` |
   | 1 h to 72 h | `regby_code_locked` |
   | never issued, or over 72 h | `regby_code_not_found` |
 
 **Single use, at most once.** The code is consumed before the reply is
 published. A reply no relay accepted still burns the code (logged as
-`Code consumed but its reply reached no relay`); the customer's retry is
-refused and the merchant re-mints.
+`Code consumed but its reply reached no relay`); the same customer's retry
+inside the minute is served again (audited as `redeem` with reason `repeat`),
+after it the merchant re-mints.
+
+**One merchant notice per customer.** Every distinct pubkey that sends the
+code while it is under 1 min old gets the merchant one notice: the winner a
+`regby_content_delivered` (the content) after their `regby_content`, each
+later one a `regby_conflict` (the warning) after their own `regby_conflict`.
+Separate intents, so the merchant never mistakes a refused customer for the
+winner, even when the winner's notice reached no relay. A pubkey already
+counted gets no further notice: the winner is served again, a refused one
+refused again. Past the minute nobody is counted. The store keeps the counted
+pubkeys per code in `redeemers`, carried across midnight and wiped from
+archives like the origin.
+
+**A conflict is a warning on both sides.** The first to type a live code gets
+the content, so an onlooker who reads it off the merchant's screen can beat
+the real customer to it. The refused customer may be the real one, and the
+pubkey in `regby_content_delivered` an attacker: apps MUST show
+`regby_conflict` prominently, to the customer as "someone else got this
+code" and to the merchant as "check who you are dealing with".
+
+**Notices keep arrival order.** Each notice is stamped with the moment the
+store counted its customer, and at least one second after the previous notice
+for that code, so two customers in the same second still get distinct,
+ordered stamps.
 
 ### Code store
 
@@ -161,10 +195,10 @@ refused and the merchant re-mints.
   a number nor cuts short a code minted at 23:59.
 - **No number reuse for 72 h.** A row is deleted 72 h after it was issued,
   never sooner, so a customer holding an old code can never open someone
-  else's content with it.
+  else's content with it. Its counted customers (`redeemers`) go with it.
 - **Content stays for debugging** in the live file until the row is deleted.
   Old day files are kept as an archive but **wiped of every content and
-  pubkey**: on rotation for the file being left, and at startup for any older
+  pubkey** (origins and counted customers): on rotation for the file being left, and at startup for any older
   file. Deleted rows are zeroed (`secure_delete`) and the WAL is checkpointed.
 - A 60 s timer deletes rows past 72 h, prunes rate-limit buckets and
   blacklist entries, rotates the file after midnight, and publishes deletions.
@@ -220,6 +254,7 @@ or changing a relay.
 | One key flooding the broker | Per-sender sliding window (`REGBY_RATE_MAX`). |
 | Fresh keys filling the store | Global mint ceiling (`REGBY_MINT_RATE_MAX`), boot-checked to fit `REGBY_STORE_MAX` over 72 h; past capacity, `regby_code_busy`. |
 | Guessing codes to harvest content | Global redeem ceiling (`REGBY_REDEEM_RATE_MAX`), plus `not-found` / `locked` strikes per sender leading to a 24 h blacklist with no reply. |
+| Onlookers flooding a merchant with notices | One notice per pubkey per code (`regby_content_delivered` or `regby_conflict`), only inside the code's minute, under the same per-sender and global redeem ceilings. |
 | A forged `created_at` stretching a code | Skew clamp (`REGBY_CLOCK_SKEW_SECONDS`). |
 | Relay re-delivery double-minting | Seen-id set. |
 | A wall clock stepping back reviving a code | Store time is monotonic within a process. |
@@ -237,4 +272,5 @@ or changing a relay.
 ## Known open points
 
 - Not yet verified that every relay and NIP-04 client accepts a kind 4 with
-  empty content; some clients may try to decrypt `""` and throw.
+  empty content; some clients may try to decrypt `""` and throw. Every
+  `request_regby_content` now carries `""`, not only failures and empty texts.

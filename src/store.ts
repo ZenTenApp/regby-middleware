@@ -10,14 +10,16 @@
  *
  * **One state at a time, by age**, each later one overriding the earlier, so
  * whether a code was ever redeemed matters only inside its minute:
- *   - inside validity: unused → served and consumed; used → `redeemed`.
+ *   - inside validity: unused → served and consumed; used by the same
+ *     customer → served again; used by another → `redeemed`.
  *   - past validity, inside the answer window → `expired`, used or not.
  *   - past the answer window, row still held → `locked`.
  *   - no row (never issued, or deleted after 72 h) → `not-found`.
  *
  * More columns: `created_at` = the server wall-clock at mint, which never
  * decides validity but does decide when the number may be reused (below),
- * `redeemed_at` = when the code was redeemed, NULL until then, and the code's
+ * `redeemed_at` = when the code was redeemed, NULL until then, `redeemed_by` =
+ * the customer pubkey that redeemed it, and the code's
  * origin (`merchant_pubkey`, `request_event`): who asked for it and with which
  * event, so a redeem can name the merchant to the customer and notify the
  * merchant on their own request thread.
@@ -28,11 +30,23 @@
  * config: it is a guarantee to customers holding an old code, not a tuning knob.
  *
  * **Single-use**: the first successful redeem consumes the code - it stamps
- * `redeemed_at`. A later redeem inside validity reports `redeemed`; past it,
- * the age decides (above). The consume is a compare-and-set on the row
- * itself, so a code is redeemed at most once, and the store reads time through
+ * `redeemed_at` and `redeemed_by`. Inside validity that same customer is served
+ * again (a retry after a lost reply or a reload: they already hold the content),
+ * anyone else gets `redeemed`; past it, the age decides (above). The consume is
+ * a compare-and-set on the row itself, so a code is redeemed at most once, and
+ * the store reads time through
  * `monotonic`, so a wall clock stepping backward can't revive a lapsed code
  * either (within one process).
+ *
+ * **Redeemers**: every distinct customer pubkey that sends a code inside its
+ * validity, the winner and each one refused as `redeemed`, gets one row in
+ * `redeemers`, so the merchant is notified once per customer (the winner's
+ * `regby_content_delivered`, a `regby_conflict` for each refused one).
+ * Its `notice_at` is that notice's `created_at`: the attempt time, but at least
+ * one second past the code's previous notice, so the notices keep the order
+ * their customers arrived in even within one second. A customer already
+ * counted gets no second notice. Rows are deleted with their
+ * code and wiped from archives like the origin and `redeemed_by`.
  *
  * **Content stays for debugging**: a row keeps its content and origin until it is
  * deleted with the row, 72 h after issue, so the live file shows what every
@@ -67,15 +81,33 @@ export interface CodeOrigin {
 
 export type RedeemFailureReason = 'not-found' | 'locked' | 'expired' | 'redeemed';
 
-/** `origin` is null only for a row carried from a daily file older than the origin columns. */
+/**
+ * What a merchant notice needs, for one customer who sent the code inside its
+ * validity: one per distinct customer pubkey per code. Whether it is the
+ * winner's `regby_content_delivered` or a `regby_conflict` follows from the
+ * redeem result it comes with.
+ */
+export interface MerchantNotice {
+  origin: CodeOrigin;
+  /** Unix seconds for the notice's `created_at`, strictly increasing per code. */
+  at: number;
+}
+
+/**
+ * `notice` is null when the customer was already counted for this code, or the
+ * row has no origin (carried from a daily file older than the origin columns).
+ * `repeat` marks the winner served again: no notice then, they were counted
+ * when they won. `origin` (on a success) names the merchant to the customer.
+ */
 export type RedeemResult =
-  | { ok: true; content: string; origin: CodeOrigin | null }
-  | { ok: false; reason: RedeemFailureReason };
+  | { ok: true; content: string; origin: CodeOrigin | null; notice: MerchantNotice | null; repeat: boolean }
+  | { ok: false; reason: 'redeemed'; notice: MerchantNotice | null }
+  | { ok: false; reason: Exclude<RedeemFailureReason, 'redeemed'> };
 
 /** Shared surface of `CodeStore` and its rotating wrapper - the broker's seam. */
 export interface CodeStoreLike {
   mint(content: string, startedAt: number, origin: CodeOrigin): MintResult | null;
-  redeem(code: string): RedeemResult;
+  redeem(code: string, customerPubkey: string): RedeemResult;
   sweep(): void;
   readonly size: number;
   close(): void;
@@ -88,6 +120,7 @@ interface CodeRow {
   expires_at: number;
   retain_until: number;
   redeemed_at: number | null;
+  redeemed_by: string | null;
   merchant_pubkey: string | null;
   request_event: string | null;
 }
@@ -100,11 +133,13 @@ interface CodeRow {
  *     `expires_at` to now, so a code consumed before the upgrade answers
  *     `expired`, not `redeemed`, for the rest of its answer window.
  *   - origin: unknown, so its redeem names no merchant and notifies none.
+ *   - `redeemed_by`: no known winner, so nobody is served the code again.
  */
 const LATE_COLUMNS = {
   redeemed_at: 'INTEGER',
   merchant_pubkey: 'TEXT',
   request_event: 'TEXT',
+  redeemed_by: 'TEXT',
 } as const;
 
 function columnNames(db: DatabaseSync, schema: string): Set<string> {
@@ -112,10 +147,19 @@ function columnNames(db: DatabaseSync, schema: string): Set<string> {
   return new Set(rows.map((r) => r.name));
 }
 
+/** Whether `schema` has the `redeemers` table; daily files older than it do not. */
+function hasRedeemers(db: DatabaseSync, schema: string): boolean {
+  return (
+    db.prepare(`SELECT 1 FROM ${schema}.sqlite_master WHERE type = 'table' AND name = 'redeemers'`).get() !==
+    undefined
+  );
+}
+
 /**
  * Bring an existing daily file to the current schema: `uri` (from when content
- * was always an invoice) becomes `content`, and any late column is added.
- * Idempotent, and a no-op on a file this build created.
+ * was always an invoice) becomes `content`, any late column is added, and the
+ * `redeemers` table is created. Idempotent, and a no-op on a file this build
+ * created.
  */
 function upgradeSchema(db: DatabaseSync): void {
   const have = columnNames(db, 'main');
@@ -128,6 +172,14 @@ function upgradeSchema(db: DatabaseSync): void {
   for (const [name, type] of Object.entries(LATE_COLUMNS)) {
     if (!have.has(name)) db.exec(`ALTER TABLE codes ADD COLUMN ${name} ${type}`);
   }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS redeemers (
+      code      TEXT NOT NULL,
+      pubkey    TEXT NOT NULL,
+      notice_at INTEGER NOT NULL,
+      PRIMARY KEY (code, pubkey)
+    )
+  `);
 }
 
 const DAY_SECONDS = 86_400;
@@ -141,9 +193,10 @@ export const CODE_REUSE_SECONDS = 3 * DAY_SECONDS;
 /** A row knows who asked for it: both origin columns are set (they are written together). */
 const HAS_ORIGIN_SQL = 'merchant_pubkey IS NOT NULL AND request_event IS NOT NULL';
 
-/** Empties every content and origin in a file leaving service (rotation, startup scrub). */
-const WIPE_SQL = `UPDATE codes SET content = '', merchant_pubkey = NULL, request_event = NULL
-  WHERE content != '' OR merchant_pubkey IS NOT NULL OR request_event IS NOT NULL`;
+/** Empties every content, origin and customer pubkey in a file leaving service (rotation, startup scrub). */
+const WIPE_SQL = `UPDATE codes SET content = '', merchant_pubkey = NULL, request_event = NULL, redeemed_by = NULL
+  WHERE content != '' OR merchant_pubkey IS NOT NULL OR request_event IS NOT NULL OR redeemed_by IS NOT NULL;
+  DELETE FROM redeemers;`;
 
 const CODE_SPACE = 100_000_000; // eight digits: 00000000–99999999
 const MAX_MINT_ATTEMPTS = 20; // collision retries before giving up
@@ -153,6 +206,8 @@ export class CodeStore implements CodeStoreLike {
   private readonly insertStmt: StatementSync;
   private readonly selectStmt: StatementSync;
   private readonly consumeStmt: StatementSync;
+  private readonly redeemerStmt: StatementSync;
+  private readonly sweepRedeemersStmt: StatementSync;
   private readonly sweepStmt: StatementSync;
   private readonly countStmt: StatementSync;
   private readonly now: () => number;
@@ -191,15 +246,27 @@ export class CodeStore implements CodeStoreLike {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     this.selectStmt = this.db.prepare(
-      'SELECT content, created_at, expires_at, retain_until, redeemed_at, merchant_pubkey, request_event FROM codes WHERE code = ?',
+      'SELECT content, created_at, expires_at, retain_until, redeemed_at, redeemed_by, merchant_pubkey, request_event FROM codes WHERE code = ?',
     );
     // Guarded on the row, not on the caller's earlier read: only an unused,
     // unexpired row flips, so `changes` alone is the redeem verdict. A row from
     // a wiped archive has neither content nor origin and is never served; a
     // live row with empty content still has its origin, so it redeems.
     this.consumeStmt = this.db.prepare(
-      `UPDATE codes SET redeemed_at = ?1 WHERE code = ?2 AND redeemed_at IS NULL
+      `UPDATE codes SET redeemed_at = ?1, redeemed_by = ?3 WHERE code = ?2 AND redeemed_at IS NULL
          AND (content != '' OR ${HAS_ORIGIN_SQL}) AND expires_at > ?1`,
+    );
+    // Counts a customer once per code. A row comes back only for a pubkey not
+    // yet counted, stamped at least a second past the code's last notice; an
+    // aggregate over no rows still yields one, so the first is stamped now.
+    this.redeemerStmt = this.db.prepare(
+      `INSERT OR IGNORE INTO redeemers (code, pubkey, notice_at)
+         SELECT ?1, ?2, MAX(?3, COALESCE(MAX(notice_at) + 1, ?3)) FROM redeemers WHERE code = ?1
+         RETURNING notice_at`,
+    );
+    // Runs before `sweepStmt`, so a number freed for reuse leaves no redeemers behind.
+    this.sweepRedeemersStmt = this.db.prepare(
+      'DELETE FROM redeemers WHERE code IN (SELECT code FROM codes WHERE created_at <= ?)',
     );
     this.sweepStmt = this.db.prepare('DELETE FROM codes WHERE created_at <= ?');
     this.countStmt = this.db.prepare('SELECT COUNT(*) AS n FROM codes');
@@ -243,32 +310,54 @@ export class CodeStore implements CodeStoreLike {
   }
 
   /**
-   * Redeem a code: the state its age puts it in (see the header). Valid and
-   * unused → `ok`, and the code is consumed (single-use).
+   * Redeem a code for `customerPubkey`: the state its age puts it in (see the
+   * header). Valid and unused → `ok`, and the code is consumed (single-use);
+   * valid and used by this same customer → `ok` again, as a `repeat`. Inside
+   * validity any other customer is also counted (see "Redeemers"), whether
+   * they won or were refused as `redeemed`.
    */
-  redeem(code: string): RedeemResult {
+  redeem(code: string, customerPubkey: string): RedeemResult {
     const row = this.selectStmt.get(code) as CodeRow | undefined;
     const now = this.now();
     // A row past the reuse window is gone, even before the sweep deletes it.
     if (!row || now >= row.created_at + CODE_REUSE_SECONDS) return { ok: false, reason: 'not-found' };
     if (now >= row.retain_until) return { ok: false, reason: 'locked' };
     if (now >= row.expires_at) return { ok: false, reason: 'expired' };
-    if (row.redeemed_at !== null) return { ok: false, reason: 'redeemed' };
-    if (Number(this.consumeStmt.run(now, code).changes) === 1) {
-      const origin =
-        row.merchant_pubkey !== null && row.request_event !== null
-          ? { merchantPubkey: row.merchant_pubkey, requestEvent: row.request_event }
-          : null;
-      return { ok: true, content: row.content, origin };
+    const origin =
+      row.merchant_pubkey !== null && row.request_event !== null
+        ? { merchantPubkey: row.merchant_pubkey, requestEvent: row.request_event }
+        : null;
+    // A wiped archive row inside its minute: nothing to serve, nobody to notify.
+    if (row.content === '' && origin === null) return { ok: false, reason: 'expired' };
+    // Only the pubkey that won: anyone else asking for a used code is a conflict.
+    if (row.redeemed_at !== null && row.redeemed_by === customerPubkey) {
+      return { ok: true, content: row.content, origin, notice: null, repeat: true };
     }
-    // Inside its minute, unused, yet the guarded consume refused it: a wiped
-    // archive row, which has nothing left to serve.
-    return { ok: false, reason: 'expired' };
+    const won = row.redeemed_at === null && Number(this.consumeStmt.run(now, code, customerPubkey).changes) === 1;
+    const notice = this.countRedeemer(code, customerPubkey, now, origin);
+    return won
+      ? { ok: true, content: row.content, origin, notice, repeat: false }
+      : { ok: false, reason: 'redeemed', notice };
   }
 
-  /** Drop rows, content included, past the 72 h reuse window. */
+  /** Count a customer against a live code; a notice comes back only the first time. */
+  private countRedeemer(
+    code: string,
+    customerPubkey: string,
+    now: number,
+    origin: CodeOrigin | null,
+  ): MerchantNotice | null {
+    // No merchant to notify, so no reason to keep the customer's pubkey either.
+    if (origin === null) return null;
+    const counted = this.redeemerStmt.get(code, customerPubkey, now) as { notice_at: number } | undefined;
+    return counted ? { origin, at: counted.notice_at } : null;
+  }
+
+  /** Drop rows, content and redeemers included, past the 72 h reuse window. */
   private purge(): void {
-    this.sweepStmt.run(this.now() - CODE_REUSE_SECONDS);
+    const cutoff = this.now() - CODE_REUSE_SECONDS;
+    this.sweepRedeemersStmt.run(cutoff);
+    this.sweepStmt.run(cutoff);
   }
 
   /**
@@ -292,7 +381,7 @@ export class CodeStore implements CodeStoreLike {
 
   /**
    * Copy the rows issued within the reuse window from another day's file, as they
-   * stand (content, expiry, redeemed state). Run when a new day's file opens,
+   * stand (content, expiry, redeemed state, redeemers). Run when a new day's file opens,
    * so midnight neither frees those numbers for reuse nor cuts short a code
    * still inside its minute. The source keeps its content until the caller
    * wipes it: `retire` on rotation, `scrubArchives` on startup.
@@ -309,26 +398,43 @@ export class CodeStore implements CodeStoreLike {
       const content = have.has('content') ? 'content' : 'uri';
       const late = Object.keys(LATE_COLUMNS);
       const select = late.map((c) => (have.has(c) ? c : 'NULL')).join(', ');
+      const cutoff = this.now() - CODE_REUSE_SECONDS;
       // A code already here keeps its row, but a redeem recorded in ANY copy
       // wins: carries run one file at a time and a later one can follow a
       // failed rotation, so the result must not depend on which copy came first.
+      // Its winner comes with it (SET reads the row as it was before the update).
       this.db
         .prepare(
           `INSERT INTO main.codes (code, content, created_at, expires_at, retain_until, ${late.join(', ')})
            SELECT code, ${content}, created_at, expires_at, retain_until, ${select}
            FROM prev.codes WHERE created_at > ?
-           ON CONFLICT(code) DO UPDATE SET redeemed_at = COALESCE(main.codes.redeemed_at, excluded.redeemed_at)`,
+           ON CONFLICT(code) DO UPDATE SET
+             redeemed_at = COALESCE(main.codes.redeemed_at, excluded.redeemed_at),
+             redeemed_by = CASE WHEN main.codes.redeemed_at IS NULL THEN excluded.redeemed_by ELSE main.codes.redeemed_by END`,
         )
-        .run(this.now() - CODE_REUSE_SECONDS);
+        .run(cutoff);
+      // Customers already counted stay counted across midnight. A union, so
+      // like `redeemed_at` the result does not depend on which copy came first.
+      if (hasRedeemers(this.db, 'prev')) {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO main.redeemers (code, pubkey, notice_at)
+             SELECT r.code, r.pubkey, r.notice_at
+             FROM prev.redeemers r JOIN prev.codes c ON c.code = r.code
+             WHERE c.created_at > ?`,
+          )
+          .run(cutoff);
+      }
     } finally {
       this.db.exec('DETACH DATABASE prev');
     }
   }
 
   /**
-   * Wipe all content and origins, then close. For a file leaving service on day
-   * rotation: its live codes were carried into the new day's file, and the
-   * archived file must not keep their contents or who asked for them.
+   * Wipe all content, origins and customer pubkeys, then close. For a file leaving
+   * service on day rotation: its live codes were carried into the new day's
+   * file, and the archived file must not keep their contents or who asked for
+   * or typed them.
    */
   retire(): void {
     this.db.exec(WIPE_SQL);
@@ -392,17 +498,18 @@ function dailyDbFiles(basePath: string): string[] {
 }
 
 /**
- * Wipe all content and origins left in an archived daily file. Rotation and the startup
- * carry clean the file they leave, but a server down across two or more
- * midnights never touched the older ones, and nothing else ever would.
+ * Wipe all content, origins and customer pubkeys left in an archived daily
+ * file. Rotation and the startup carry clean the file they leave, but a server
+ * down across two or more midnights never touched the older ones, and nothing
+ * else ever would.
  */
 function scrubArchive(path: string): void {
   const db = new DatabaseSync(path);
   try {
     if (columnNames(db, 'main').size === 0) return;
     db.exec('PRAGMA secure_delete = ON');
-    // `WIPE_SQL` names the origin columns, so an archive from before they
-    // existed gains them (idempotent: a no-op once added).
+    // `WIPE_SQL` names the late columns and the `redeemers` table, so an
+    // archive from before them gains them first (idempotent: a no-op once added).
     upgradeSchema(db);
     db.exec(WIPE_SQL);
   } finally {
@@ -516,9 +623,9 @@ export class RotatingCodeStore implements CodeStoreLike {
     return this.current.mint(content, startedAt, origin);
   }
 
-  redeem(code: string): RedeemResult {
+  redeem(code: string, customerPubkey: string): RedeemResult {
     this.rotateIfNeeded();
-    return this.current.redeem(code);
+    return this.current.redeem(code, customerPubkey);
   }
 
   sweep(): void {

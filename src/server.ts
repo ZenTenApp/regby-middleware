@@ -1,23 +1,30 @@
 /**
  * ReGBY broker. Wires the transport, store, and rate limiter together and
  * dispatches inbound events:
- *   request_regby_code    → mint a code, reply `i:regby_code` (content = code)
- *   request_regby_content → look up code, reply `i:regby_content` (content =
- *                           the stored content, single-use); a successful one
- *                           also sends the merchant `i:regby_content_delivered`
- *                           (content = the code)
+ *   request_regby_code    → mint a code, reply `i:regby_code` (content = the
+ *                           merchant's own content back)
+ *   request_regby_content → read the code from `CODE_TAG`, reply
+ *                           `i:regby_content` (content = the stored content,
+ *                           single-use, served again to the same customer
+ *                           inside its minute) and tell the merchant
+ *                           `i:regby_content_delivered` (the stored content).
+ *                           Any other customer inside the minute gets
+ *                           `i:regby_conflict`, and so does the merchant, once
+ *                           per such customer; both carry `CONFLICT_WARNING`.
+ *                           Each notice is tagged `to` = that customer.
  * Content is opaque: never judged here, only carried (see `protocol.ts`).
- * A failure replies with its own `FAILURE_INTENT` and empty content. Every
- * reply links to the request via the `e` tag, and every reply about a code
- * names it in `CODE_TAG`.
+ * A failure replies with its own `FAILURE_INTENT` and empty content (a
+ * conflict: its warning). Every reply links to the request via the `e` tag,
+ * and every reply about a code names it in `CODE_TAG`, the only place the code
+ * travels.
  */
 import type { Event } from 'nostr-tools';
 import type { Config } from './config.ts';
-import { createTransport, type ReGBYTransport, type ReplyTarget } from './nostr.ts';
+import { createTransport, type ReGBYTransport, type ReplyOptions, type ReplyTarget } from './nostr.ts';
 import {
   RotatingCodeStore,
-  type CodeOrigin,
   type CodeStoreLike,
+  type MerchantNotice,
   type RedeemFailureReason,
 } from './store.ts';
 import { RateLimiter } from './rate-limit.ts';
@@ -26,17 +33,22 @@ import { BoundedMap } from './bounded-map.ts';
 import { nowSeconds } from './time.ts';
 import {
   CODE_TAG,
+  CONFLICT_INTENT,
+  CONFLICT_WARNING,
   CONTENT_DELIVERED_INTENT,
   EMPTY_CONTENT,
   extractIntent,
   FROM_TAG,
-  parseInbound,
+  parseCodeRequest,
+  parseRedeem,
   FAILURE_INTENT,
   REPLY_INTENT,
   TO_TAG,
   type FailureIntent,
+  type InboundIntent,
   type InboundMessage,
   type OutboundIntent,
+  type ParseResult,
 } from './protocol.ts';
 import { HttpAuditSink, NO_AUDIT, type AuditEntry, type AuditSink } from './audit-sender.ts';
 import { errorMessage, logger } from './logger.ts';
@@ -47,12 +59,18 @@ type AuditFields = Omit<AuditEntry, 'pubkey' | 'requestEvent'>;
 /** Remember processed event ids so a relay re-delivery can't double-mint. */
 const SEEN_MAX = 50_000;
 
-/** Reply intent per redeem refusal (see `FAILURE_INTENT` for the app contract). */
-const REDEEM_FAILURE_INTENT: Record<RedeemFailureReason, FailureIntent> = {
-  redeemed: FAILURE_INTENT.redeemed,
-  expired: FAILURE_INTENT.expired,
-  locked: FAILURE_INTENT.locked,
-  'not-found': FAILURE_INTENT.notFound,
+/** Both conflict events, the customer's refusal and the merchant's notice, from one definition. */
+const CONFLICT = { intent: CONFLICT_INTENT, content: CONFLICT_WARNING } as const;
+
+/**
+ * Reply per redeem refusal (see `FAILURE_INTENT` for the app contract): empty
+ * content, but a conflict tells the customer what happened.
+ */
+const REDEEM_REFUSAL: Record<RedeemFailureReason, { intent: FailureIntent; content: string }> = {
+  redeemed: CONFLICT,
+  expired: { intent: FAILURE_INTENT.expired, content: EMPTY_CONTENT },
+  locked: { intent: FAILURE_INTENT.locked, content: EMPTY_CONTENT },
+  'not-found': { intent: FAILURE_INTENT.notFound, content: EMPTY_CONTENT },
 };
 
 /**
@@ -68,6 +86,21 @@ export interface BrokerDeps {
   store: CodeStoreLike;
   auditSink: AuditSink;
 }
+
+/** A merchant notice: its intent and content, and what its audit row adds to the code. */
+interface MerchantMessage {
+  intent: OutboundIntent;
+  content: string;
+  record: Pick<AuditFields, 'content' | 'reason'>;
+}
+
+/**
+ * The notice about a refused customer. Fixed: a warning, not the merchant's
+ * text, so its row keeps no content. Both notices audit as `merchant_notified`,
+ * since a sink validates event names against its own build; this one is told
+ * apart by `reason`, which is free text.
+ */
+const CONFLICT_NOTICE: MerchantMessage = { ...CONFLICT, record: { reason: 'conflict' } };
 
 /** Single bucket key for the global (all-sender) limiters. */
 const GLOBAL_KEY = 'all';
@@ -163,18 +196,9 @@ export class ReGBYBroker {
       return;
     }
 
-    let plaintext: string;
-    try {
-      plaintext = this.transport.decrypt(event.pubkey, event.content);
-    } catch {
-      logger.debug('Decrypt failed - dropping', { id: event.id.slice(0, 12) });
-      return;
-    }
-    // Raw decrypted inbound content (the sender's content or code). Debug only - sensitive.
-    logger.debug('Inbound plaintext', { intent, from: event.pubkey.slice(0, 12), plaintext });
-
+    const parsed = this.parse(intent, event);
+    if (parsed === null) return;
     const target: ReplyTarget = { recipientPubkey: event.pubkey, requestEventId: event.id };
-    const parsed = parseInbound(intent, plaintext);
     if (!parsed.ok) {
       if (parsed.reason === 'binary') {
         // Bytes, not text: no reply, nothing stored. Info, not warn: any
@@ -186,11 +210,30 @@ export class ReGBYBroker {
         });
         return;
       }
-      logger.debug('Unusable content - dropping', { id: event.id.slice(0, 12), intent });
+      logger.debug('Unusable request - dropping', { id: event.id.slice(0, 12), intent });
       return;
     }
 
     await this.dispatch(target, parsed.message, event.created_at);
+  }
+
+  /**
+   * A redeem is read from its `CODE_TAG` alone: its content is empty by
+   * protocol, so it is never decrypted. A code request's content is the
+   * merchant's text. Null when that content does not decrypt.
+   */
+  private parse(intent: InboundIntent, event: Event): ParseResult | null {
+    if (intent === 'request_regby_content') return parseRedeem(event.tags);
+    let plaintext: string;
+    try {
+      plaintext = this.transport.decrypt(event.pubkey, event.content);
+    } catch {
+      logger.debug('Decrypt failed - dropping', { id: event.id.slice(0, 12) });
+      return null;
+    }
+    // Raw decrypted merchant content. Debug only - sensitive.
+    logger.debug('Inbound plaintext', { intent, from: event.pubkey.slice(0, 12), plaintext });
+    return parseCodeRequest(plaintext);
   }
 
   /**
@@ -237,7 +280,8 @@ export class ReGBYBroker {
         from,
         expiresAt: minted.expiresAt,
       });
-      await this.answer(target, REPLY_INTENT.request_regby_code, minted.code, {
+      // The merchant's own content back; the code rides in `CODE_TAG` only.
+      await this.answer(target, REPLY_INTENT.request_regby_code, message.content, {
         event: 'code_issued',
         code: minted.code,
         content: message.content,
@@ -254,7 +298,7 @@ export class ReGBYBroker {
       return;
     }
 
-    const result = this.store.redeem(message.code);
+    const result = this.store.redeem(message.code, target.recipientPubkey);
     if (!result.ok) {
       // A guess (see `GUESS_REASONS`) is a miss against the code space. Count
       // strikes per sender and blacklist a persistent guesser; return no reply
@@ -271,23 +315,30 @@ export class ReGBYBroker {
         from,
         reason: result.reason,
       });
-      await this.answer(target, REDEEM_FAILURE_INTENT[result.reason], EMPTY_CONTENT, {
+      const refusal = REDEEM_REFUSAL[result.reason];
+      await this.answer(target, refusal.intent, refusal.content, {
         event: 'redeem_refused',
         code: message.code,
         reason: result.reason,
       });
+      // A refused customer the merchant has not heard of yet: tell the
+      // merchant, so they can see their code reached more than one key.
+      if (result.reason === 'redeemed' && result.notice) {
+        await this.notifyMerchant(result.notice, message.code, target.recipientPubkey, CONFLICT_NOTICE);
+      }
       return;
     }
-    logger.info('Redeemed code', { from });
+    logger.info(result.repeat ? 'Served code again to its customer' : 'Redeemed code', { from });
     // Consume-before-publish is the at-most-once order, so a reply no relay
-    // took has already burnt the code: the customer's retry is refused and the
-    // merchant must re-mint. Surface it, or it looks like user error.
+    // took has already burnt the code: only this customer's retry inside the
+    // minute is served again; past it the merchant must re-mint. Surface it,
+    // or it looks like user error.
     const delivered = await this.answer(
       target,
       REPLY_INTENT.request_regby_content,
       result.content,
-      { event: 'redeem', code: message.code, content: result.content },
-      result.origin ? [[FROM_TAG, result.origin.merchantPubkey]] : [],
+      { event: 'redeem', code: message.code, content: result.content, ...(result.repeat ? { reason: 'repeat' } : {}) },
+      { extraTags: result.origin ? [[FROM_TAG, result.origin.merchantPubkey]] : [] },
     );
     if (!delivered) {
       logger.warn('Code consumed but its reply reached no relay', {
@@ -297,25 +348,42 @@ export class ReGBYBroker {
     // After the customer's reply, on purpose: the customer is the one waiting
     // on screen. Sent whether or not that reply landed: the code is burnt
     // either way, and the merchant must know it is gone to re-mint.
-    if (result.origin) await this.notifyMerchant(result.origin, message.code, target.recipientPubkey);
+    if (result.notice) {
+      await this.notifyMerchant(result.notice, message.code, target.recipientPubkey, {
+        intent: CONTENT_DELIVERED_INTENT,
+        content: result.content,
+        record: { content: result.content },
+      });
+    }
   }
 
-  /** Tell the merchant their code was redeemed, on the thread of their own request. */
-  private async notifyMerchant(origin: CodeOrigin, code: string, customerPubkey: string): Promise<void> {
+  /**
+   * Tell the merchant a customer sent their code, on the thread of their own
+   * request: delivered (with the content) for the one who got it, a conflict
+   * for each one refused after. Stamped with the store's `notice.at`, not
+   * publish time, so the notices of a code keep the order their customers
+   * arrived in.
+   */
+  private async notifyMerchant(
+    notice: MerchantNotice,
+    code: string,
+    customerPubkey: string,
+    message: MerchantMessage,
+  ): Promise<void> {
     const target: ReplyTarget = {
-      recipientPubkey: origin.merchantPubkey,
-      requestEventId: origin.requestEvent,
+      recipientPubkey: notice.origin.merchantPubkey,
+      requestEventId: notice.origin.requestEvent,
     };
     const delivered = await this.answer(
       target,
-      CONTENT_DELIVERED_INTENT,
-      code,
-      { event: 'merchant_notified', code },
-      [[TO_TAG, customerPubkey]],
+      message.intent,
+      message.content,
+      { event: 'merchant_notified', code, ...message.record },
+      { extraTags: [[TO_TAG, customerPubkey]], createdAt: notice.at },
     );
     if (!delivered) {
-      logger.warn('Merchant content-delivered notice reached no relay', {
-        to: origin.merchantPubkey.slice(0, 12),
+      logger.warn('Merchant notice reached no relay', {
+        to: notice.origin.merchantPubkey.slice(0, 12),
       });
     }
   }
@@ -332,10 +400,11 @@ export class ReGBYBroker {
     intent: OutboundIntent,
     content: string,
     fields: AuditFields,
-    extraTags: readonly string[][] = [],
+    options: ReplyOptions = {},
   ): Promise<boolean> {
+    const extraTags = options.extraTags ?? [];
     const tags = fields.code ? [[CODE_TAG, fields.code], ...extraTags] : extraTags;
-    const delivered = await this.transport.reply(target, intent, content, tags);
+    const delivered = await this.transport.reply(target, intent, content, { ...options, extraTags: tags });
     this.audit(target, { ...fields, delivered });
     return delivered;
   }

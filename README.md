@@ -17,14 +17,15 @@ sequenceDiagram
     rect rgba(59, 130, 246, 0.15)
     Note over M,B: Mint
     M->>B: request_regby_code (text)
-    B->>M: regby_code (code)
+    B->>M: regby_code (text, code tag)
     end
     Note over M,C: the merchant shows the code, the customer types it
     rect rgba(16, 185, 129, 0.15)
     Note over B,C: Redeem
-    C->>B: request_regby_content (code)
+    C->>B: request_regby_content (code tag)
     B->>C: regby_content (text, from = merchant)
-    B->>M: regby_content_delivered (to = customer)
+    B->>M: regby_content_delivered (text, to = customer)
+    Note over M,C: regby_conflict to each other customer who sends the code in time, and to the merchant naming them
     end
     rect rgba(245, 158, 11, 0.15)
     Note over M,C: After the match: direct, the broker never sees it
@@ -38,9 +39,16 @@ message (in the payment case, the `defifrom://` confirmation) with the code,
 so the merchant can tell it apart from a stranger's. Details:
 [docs/spec.md, After the match](docs/spec.md#after-the-match).
 
-A code works once, within one minute of the merchant's request. After that it
-answers `regby_code_expired` until it is an hour old, then `regby_code_locked`
-until 72 h, and only then can the number be issued again.
+The code never travels in a message's content, only in its plaintext
+`regby_code` tag. A code works once, within one minute of the merchant's
+request; inside that minute the customer who got the text can fetch it again.
+Anyone else who sends it inside that minute gets `regby_conflict`, a warning
+that someone else redeemed it first, and the merchant gets a `regby_conflict`
+naming each of them, next to the one `regby_content_delivered` for the
+customer who got the text. Apps show both as warnings: whoever was first may
+have read the code off the merchant's screen. After the
+minute the code answers `regby_code_expired` until it is an hour old, then
+`regby_code_locked` until 72 h, and only then can the number be issued again.
 
 Every message is a NIP-04 encrypted kind 4 DM on dedicated DM relays that
 serve a DM only to its author and its recipient

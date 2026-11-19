@@ -57,8 +57,9 @@ These did not exist when the middleware judged content.
    must screen it (check 4) before rendering anything.
 3. **Telling a value from an error.** The app used to tell a value from a
    failure reason by shape (eight digits or `defito://` = value, anything
-   else = reason). Failures now have their own intents with empty content:
-   `regby_code_already_redeemed`, `regby_code_expired`, `regby_code_locked`,
+   else = reason). Failures now have their own intents with empty content
+   (`regby_conflict` carries a fixed warning instead):
+   `regby_conflict`, `regby_code_expired`, `regby_code_locked`,
    `regby_code_not_found` answer a `request_regby_content`, and
    `regby_code_busy` answers a `request_regby_code`. The app must match these
    to its pending request by `e` (as it does `regby_code` / `regby_content`)
@@ -69,11 +70,27 @@ These did not exist when the middleware judged content.
    can stay on the app's allowlist only for older middleware builds.
 5. **Pairing tags.** Read `from` (merchant hex pubkey) on `regby_content` and
    handle the new `regby_content_delivered` notice (`e` = the merchant's own
-   `request_regby_code`, `to` = customer hex pubkey). Both tags are
-   plaintext on the relay.
-6. **Code tag.** Replies about a code carry it in plaintext
-   ([protocol.md](protocol.md#pairing-and-code-tags-are-plaintext)). The app can
-   match on it, but `e` stays the reply linkage.
+   `request_regby_code`, `to` = customer hex pubkey, content = the merchant's
+   text as the customer received it). Both tags are plaintext on the relay.
+6. **Code tag.** The code travels only in the plaintext `regby_code` tag
+   ([protocol.md](protocol.md#pairing-and-code-tags-are-plaintext)). The app
+   reads it from the tag of `regby_code`, whose content is now the merchant's
+   own text sent back, and sends `request_regby_content` with content `""` and
+   the code in the tag: the broker drops one without the tag. `e` stays the
+   reply linkage.
+7. **Conflicts are warnings, on both sides.** `regby_conflict` replaces
+   `regby_code_already_redeemed`: a customer who sends a code another pubkey
+   already redeemed, inside its minute, gets it instead of the content. The
+   merchant gets one too, besides the one `regby_content_delivered`, for every
+   such customer (`e` = their own request, `to` = that customer). Its content
+   is a fixed warning, never the merchant's text. The app MUST show it
+   prominently: the first to type a live code may be an onlooker who read it
+   off the merchant's screen, so the refused customer can be the real one.
+   Only the delivered notice is a match
+   ([spec.md, Match records](spec.md#match-records)).
+8. **Retry is safe.** The customer who got the content can send the same
+   `request_regby_content` again inside the code's minute and gets
+   `regby_content` again, with no new notice to the merchant.
 
 ## Size
 

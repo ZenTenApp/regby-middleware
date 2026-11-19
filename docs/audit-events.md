@@ -34,8 +34,8 @@ can say whether the reply reached a relay (`delivered`).
 | `event` | text | no | What happened. See [Events](#events). |
 | `pubkey` | text | no | Full 64-character hex pubkey of whoever sent the request. See [Events](#events) for whether that is the merchant or the customer. |
 | `request_event` | text | no | Id of the incoming Nostr event (kind 4) this row answers. The relays keep events for at most 72 h. |
-| `code` | text | yes | The 8-digit code. For `code_issued` it is the code that was issued. For `redeem`, `redeem_refused` and `blacklisted`/`guessing` it is the code the customer typed. |
-| `content` | text | yes | The full content as sent: any text, a `defito://` invoice or empty included. Set **only** for served requests: `code_issued`, `regby_busy`, `redeem`. |
+| `code` | text | yes | The 8-digit code. For `code_issued` it is the code that was issued. For `redeem`, `redeem_refused` and `blacklisted`/`guessing` it is the code the customer typed. For `merchant_notified` it is the code the notice is about. |
+| `content` | text | yes | The full content as sent: any text, a `defito://` invoice or empty included. Set **only** for served requests (`code_issued`, `regby_busy`, `redeem`) and for the delivered `merchant_notified`, which echoes it. A conflict carries a fixed warning, not the content, so its row has none. |
 | `reason` | text | yes | Why the request was refused. See [reason values](#reason-values). |
 | `delivered` | boolean | yes | Whether the reply reached at least one relay. Null when no reply was sent. See [delivered](#delivered). |
 | `received_at` | bigint | no | Sink time, in unix seconds, when the row was stored. If it is much later than `ts`, the sink or the database was down and the broker kept retrying. |
@@ -44,12 +44,12 @@ can say whether the reply reached a relay (`delivered`).
 
 | `event` | when | `pubkey` is | reply the app gets | `code` | `content` | `reason` | `delivered` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `code_issued` | content (any text) got a code | merchant | the code | issued code | yes | - | true / false |
+| `code_issued` | content (any text) got a code | merchant | the content back, tagged `regby_code` = the code | issued code | yes | - | true / false |
 | `regby_busy` | no free code: `REGBY_STORE_MAX` codes were already issued in the last 72 h | merchant | `regby_code_busy` | - | yes | - | true / false |
-| `redeem` | the code was valid and is now used up | customer | the content, tagged `from` = merchant | typed code | yes | - | true / false |
-| `redeem_refused` | the code could not be used | customer | `regby_code_already_redeemed` / `regby_code_expired` / `regby_code_locked` / `regby_code_not_found` | typed code | - | `redeemed` / `expired` / `locked` / `not-found` | true / false |
+| `redeem` | the code was valid and is now used up, or its winner fetched it again inside the minute | customer | the content, tagged `from` = merchant | typed code | yes | `repeat` for the winner fetching it again, otherwise - | true / false |
+| `redeem_refused` | the code could not be used | customer | `regby_conflict` (with the conflict warning) / `regby_code_expired` / `regby_code_locked` / `regby_code_not_found` | typed code | - | `redeemed` / `expired` / `locked` / `not-found` | true / false |
 | `blacklisted` | a code guesser, blocked for `REGBY_BLACKLIST_SECONDS` (default 24 h) | customer | **no reply** | typed code | - | `guessing` | null |
-| `merchant_notified` | after a `redeem`, the merchant was told their code is used up (`regby_content_delivered`, tagged `to` = customer). Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_content_delivered`, content = the code | redeemed code | - | - | true / false |
+| `merchant_notified` | the merchant was told a customer sent their code inside its minute, tagged `to` = customer: `regby_content_delivered` after the first `redeem`, and `regby_conflict` after each `redeem_refused` / `redeemed` from a customer not counted for that code yet. Not a request: `request_event` is the merchant's original `code_issued` request | merchant | `regby_content_delivered` (content = the content) or `regby_conflict` (content = the conflict warning) | the code | for `regby_content_delivered` only | `conflict` for a `regby_conflict`, otherwise - | true / false |
 
 The broker never refuses content for what it says (see [protocol.md](protocol.md)), so no event
 records a refused payload. History written by a broker from before that
@@ -58,16 +58,16 @@ change can still hold `invalid_request` (`reason` = `malformed`) and
 refused, with the sender blocked for the second. The payload itself was never
 stored.
 
-**One row is one exchange, not one message.** A Nostr message carries either
-content or a code, never both, but a row records the request AND the reply,
-so it can hold one of each:
+**One row is one exchange, not one message.** Content travels in a message's
+`content`, the code only in its `regby_code` tag, and a row records the
+request AND the reply:
 
 | `event` | request carried | reply carried | row holds |
 | --- | --- | --- | --- |
-| `code_issued` | the content | the code | both |
+| `code_issued` | the content | the content back and the code | both |
 | `redeem` | the code | the content | both |
 | `redeem_refused`, `blacklisted` | the code | a reason, or nothing | the code |
-| `merchant_notified` | (none: a notice) | the code | the code |
+| `merchant_notified` | (none: a notice) | the content (or, for a conflict, the warning) and the code | the content (delivered only) and the code |
 
 A "-" means the column is null for that event.
 
@@ -76,23 +76,29 @@ A "-" means the column is null for that event.
 ```
 code_issued ──▶ redeem                     (normal payment)
             ──▶ redeem_refused / expired   (customer was too late, the code lives 60 s)
-            ──▶ redeem ──▶ redeem_refused / redeemed   (second attempt with the same code)
+            ──▶ redeem ──▶ redeem / repeat             (the same customer again, inside the minute)
+            ──▶ redeem ──▶ redeem_refused / redeemed   (another customer with the same code: a conflict)
 
 redeem ──▶ merchant_notified                  (always follows a redeem of a code with a known merchant)
+redeem_refused / redeemed ──▶ merchant_notified / conflict   (each other customer inside the minute, once per pubkey)
 ```
 
 To link them, query by `code`. Code numbers are not reused for 72 h, so within
-three days a code identifies a single request.
+three days a code identifies a single request. A `merchant_notified` row names
+the merchant, not the customer: the customer is the `pubkey` of the `redeem`
+or `redeem_refused` row for the same code just before it.
 
 ## reason values
 
 | `event` | `reason` | meaning | reply intent |
 | --- | --- | --- | --- |
 | `redeem_refused` | `expired` | The code's 60 s (`REGBY_CODE_TTL_SECONDS`) had passed, used or not, and it is under `REGBY_CODE_RETAIN_SECONDS` (1 h) old. | `regby_code_expired` |
-| `redeem_refused` | `redeemed` | The code was already used, and is still inside its 60 s. | `regby_code_already_redeemed` |
+| `redeem_refused` | `redeemed` | The code was already used by another customer, and is still inside its 60 s. | `regby_conflict`, with the conflict warning |
 | `redeem_refused` | `locked` | The code was issued 1 h to 72 h ago; its number is held back from reuse. Counts as a guess. | `regby_code_locked` |
 | `redeem_refused` | `not-found` | No such code, or it was issued more than 72 h ago. Counts as a guess. | `regby_code_not_found` |
 | `blacklisted` | `guessing` | One customer had more than `REGBY_REDEEM_FAIL_MAX` (default 10) `not-found` or `locked` codes within `REGBY_REDEEM_RATE_WINDOW_SECONDS` (default 60 s). The earlier misses are on record as `redeem_refused` / `not-found` or `locked`. No reply is sent, so the guesser can't tell a miss from a block. Blocked for 24 h. | nothing |
+| `merchant_notified` | `conflict` | Not a refusal: the notice to the merchant about a customer who sent the code after someone else redeemed it. | `regby_conflict` (to the merchant) |
+| `redeem` | `repeat` | Not a refusal: the customer who redeemed the code sent it again inside its 60 s and got the content again. No new `merchant_notified`. | `regby_content` |
 
 ## delivered
 
@@ -102,11 +108,10 @@ three days a code identifies a single request.
   - `code_issued`: the merchant never saw the code. The code still exists and
     expires unused.
   - `redeem`: **the code is used up but the customer never got the content**,
-    because the broker uses the code up before it sends the reply. The customer's
-    retry gets `regby_code_already_redeemed` (or `regby_code_expired` after the
-    code's minute), and the merchant has to issue a new
-    code. This is the row to look for when a customer says "it said already
-    redeemed but I never paid".
+    because the broker uses the code up before it sends the reply. The same
+    customer's retry inside the code's minute gets the content again (a second
+    `redeem` row, `reason` = `repeat`); after the minute it gets
+    `regby_code_expired` and the merchant has to issue a new code.
   - Refusals: the sender never saw the failure.
 - `null`: no reply was sent (`blacklisted` / `guessing`).
 

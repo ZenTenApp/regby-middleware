@@ -10,11 +10,15 @@
  *
  * Transport is a standard encrypted **DM (kind 4)** so events are treated as
  * messages. Design:
- *   - `content` is the **raw value**, NIP-04 encrypted: the sender's content,
- *     or the bare eight-digit code. No JSON wrapper. Empty content is the
- *     exception: it travels as a raw `""`, never encrypted (`EMPTY_CONTENT`).
- *     Some NIP-04 clients or relays may choke on a kind 4 with empty content;
- *     untested on our relays so far.
+ *   - `content` is the merchant's **raw text**, NIP-04 encrypted, on the code
+ *     request, the code reply, the content reply and the delivered notice. No
+ *     JSON wrapper. It is never the code. Empty content is the exception: it
+ *     travels as a raw `""`, never encrypted (`EMPTY_CONTENT`), and so do the
+ *     redeem request and every failure but a conflict, which carries the fixed
+ *     `CONFLICT_WARNING`. Some NIP-04 clients or relays may choke on a kind 4
+ *     with empty content; untested on our relays so far.
+ *   - the code rides only in the plaintext `CODE_TAG`: the broker sets it on
+ *     every reply about a code and reads it from the redeem request.
  *   - the message **intent** rides a plaintext `['i', <intent>]` tag -
  *     single-letter `i` is relay-indexable, so the server subscribes
  *     `#i:INBOUND_INTENTS` and pulls only inbound regby traffic.
@@ -22,14 +26,14 @@
  *     so the client matches a reply to the request it published - no in-band
  *     correlation id needed.
  *   - a failure reply names the outcome in its intent (`FAILURE_INTENT`,
- *     e.g. `regby_code_expired`) and carries empty `content` and no pairing
- *     tag. Empty content alone means nothing: a success may carry empty
- *     content too, so the client reads the intent first.
+ *     e.g. `regby_code_expired`) and carries empty `content` (a conflict: its
+ *     warning) and no pairing tag. Empty content alone means nothing: a
+ *     success may carry empty content too, so the client reads the intent
+ *     first.
  *   - relay retention is bounded by NIP-40 `['expiration', unixSec]`.
- *   - every reply about a code also carries it in plaintext (`CODE_TAG`).
  *
  * Tags are covered by the event signature, so intent/linkage are authenticated.
- * Only the content is private: the code is in the ciphertext and in `CODE_TAG`.
+ * Only the content is private: the code is plaintext, in `CODE_TAG`.
  */
 
 /** Encrypted DM kind: NIP-04 envelope and NIP-04 ciphertext, which is what
@@ -85,29 +89,46 @@ export const REPLY_INTENT = {
 } as const satisfies Record<InboundIntent, string>;
 
 /**
- * The intent of every failure reply, sent with empty content. `busy` answers a
- * `request_regby_code` (no free code to mint), the rest a
- * `request_regby_content`, one per state of the code (see `store.ts`): used
- * inside its minute, lapsed (used or not), held back from reuse, unknown. The
- * app must know each one: an intent it does not recognise never matches its
- * pending request, so a new failure needs an app release first. Pinned against
- * the app's `utils/regby.ts` by the parity test in `protocol.test.ts`.
+ * A conflict: a customer sent a code inside its validity after ANOTHER pubkey
+ * redeemed it. Sent both ways, each time with `CONFLICT_WARNING` as content:
+ * as the refusal answering that customer's `request_regby_content`, and as a
+ * notice to the merchant (`e` = their own `request_regby_code`, `to` = that
+ * customer), once per distinct customer pubkey. Either side of it may be the
+ * victim: whoever got the content may have read the code off a screen and beaten
+ * the real customer to it, so apps must show it as a warning, not a routine error.
+ */
+export const CONFLICT_INTENT = 'regby_conflict';
+
+/** Content of every `CONFLICT_INTENT` event: a fixed warning, never the merchant's text. */
+export const CONFLICT_WARNING = 'This ReGBY code was already redeemed by another npub.';
+
+/**
+ * The intent of every failure reply, sent with empty content but a conflict
+ * (see `CONFLICT_INTENT`). `busy` answers a `request_regby_code` (no free code
+ * to mint), the rest a `request_regby_content`, one per state of the code (see
+ * `store.ts`): used by another pubkey inside its minute, lapsed (used or not),
+ * held back from reuse, unknown. The app must know each one: an intent it does
+ * not recognise never matches its pending request, so a new failure needs an
+ * app release first. Pinned against the app's `utils/regby.ts` by the parity
+ * test in `protocol.test.ts`.
  */
 export const FAILURE_INTENT = {
   notFound: 'regby_code_not_found',
   expired: 'regby_code_expired',
-  redeemed: 'regby_code_already_redeemed',
+  conflict: CONFLICT_INTENT,
   locked: 'regby_code_locked',
   busy: 'regby_code_busy',
 } as const;
 
 /**
- * Unsolicited notice to the MERCHANT once their code is redeemed (content = the
- * code, `e` = the merchant's own `request_regby_code` event). "Delivered" means
- * the server released the content and used up the code, not that the customer's
- * reply reached a relay. Not a reply to the merchant's latest message, so it has
- * its own intent: an app that predates it drops an unknown intent instead of
- * reading it as a second `regby_code`.
+ * Unsolicited notice to the MERCHANT that their code was redeemed (content = the
+ * content the customer received, `e` = the merchant's own `request_regby_code`
+ * event, `to` = that customer). Sent once per code, not again when the same
+ * customer fetches the content again. "Delivered" means the server released the
+ * content and used up the code, not that the customer's reply reached a relay.
+ * Not a reply to the merchant's latest message, so it has its own intent: an
+ * app that predates it drops an unknown intent instead of reading it as a
+ * second `regby_code`.
  */
 export const CONTENT_DELIVERED_INTENT = 'regby_content_delivered';
 
@@ -123,19 +144,20 @@ export type OutboundIntent =
  * Plaintext tags naming the counterparty by hex pubkey (as `p` does), so each
  * side learns who the server paired them with: `from` (the merchant) on the
  * customer's `regby_content`, `to` (the customer) on the merchant's
- * `regby_content_delivered`. Unlike the content they are NOT encrypted; they
- * stay private only because the DM relays serve a kind 4 to its author and
- * recipient alone (docs/protocol.md, "Read access").
+ * `regby_content_delivered` and `regby_conflict`. Unlike the content they are
+ * NOT encrypted; they stay private only because the DM relays serve a kind 4 to
+ * its author and recipient alone (docs/protocol.md, "Read access").
  */
 export const FROM_TAG = 'from';
 export const TO_TAG = 'to';
 
 /**
- * Plaintext tag naming the code on every reply about one (all but
- * `regby_code_busy`, where none was minted). Outbound only: never read from a
- * request, so clients may omit or ignore it. NOT encrypted: safe only on relays
- * that serve a kind 4 to its author and recipient alone. On a public relay any
- * subscriber could race the customer to a live code.
+ * Plaintext tag carrying the code, the only place it travels: on every reply
+ * about one (all but `regby_code_busy`, where none was minted), and on the
+ * `request_regby_content`, where it is required and is what the broker reads.
+ * NOT encrypted: safe only on relays that serve a kind 4 to its author and
+ * recipient alone. On a public relay any subscriber could race the customer to
+ * a live code.
  */
 export const CODE_TAG = 'regby_code';
 
@@ -145,10 +167,10 @@ export type InboundMessage =
   | { intent: 'request_regby_content'; code: string };
 
 /**
- * Outcome of parsing decrypted inbound content.
+ * Outcome of parsing an inbound request.
  *  - `ok`     → a message to dispatch. Any text is a valid `request_regby_code`.
  *  - `silent` → dropped without a reply: content past `MAX_CONTENT_LENGTH`, a
- *    redeem whose content is not an eight-digit code.
+ *    redeem without an eight-digit code in its `CODE_TAG`.
  *  - `binary` → the decrypted content is bytes, not text (an image, a file, a
  *    wrong-key decrypt). Dropped like `silent`, kept apart so operators can see
  *    it in the log.
@@ -173,17 +195,23 @@ export function extractIntent(tags: string[][]): InboundIntent | null {
 }
 
 /**
- * Read decrypted `content` for an inbound intent (see `ParseResult`). Only the
- * envelope is checked - bytes, size, the code's shape - never what the
- * content says: that is the recipient's to judge.
+ * Read the decrypted content of a `request_regby_code` (see `ParseResult`).
+ * Only the envelope is checked - bytes, size - never what the content says:
+ * that is the recipient's to judge.
  */
-export function parseInbound(intent: InboundIntent, content: string): ParseResult {
+export function parseCodeRequest(content: string): ParseResult {
   if (BINARY_RE.test(content)) return { ok: false, reason: 'binary' };
   if (content.length > MAX_CONTENT_LENGTH) return { ok: false, reason: 'silent' };
-  if (intent === 'request_regby_code') return { ok: true, message: { intent, content } };
+  return { ok: true, message: { intent: 'request_regby_code', content } };
+}
 
-  // request_regby_content
-  const code = content.trim();
-  if (!REGBY_CODE_RE.test(code)) return { ok: false, reason: 'silent' };
-  return { ok: true, message: { intent, code } };
+/**
+ * Read a `request_regby_content` from its tags alone: the code is the first
+ * `CODE_TAG`, trimmed. The content is empty by protocol and never read, so it
+ * needs no decrypt.
+ */
+export function parseRedeem(tags: string[][]): ParseResult {
+  const code = tags.find((tag) => tag[0] === CODE_TAG)?.[1]?.trim();
+  if (code === undefined || !REGBY_CODE_RE.test(code)) return { ok: false, reason: 'silent' };
+  return { ok: true, message: { intent: 'request_regby_content', code } };
 }

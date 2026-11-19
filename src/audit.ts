@@ -11,7 +11,9 @@
  * unusable content) - attacker-controlled volume with nothing to reconstruct.
  *
  * The full content travels for a SERVED request (code_issued, regby_busy,
- * redeem). Content is opaque, so nothing here reads or redacts it.
+ * redeem) and for the delivered merchant notice, which echoes it; a conflict
+ * carries a fixed warning, not the content, so its row has none. Content is
+ * opaque, so nothing here reads or redacts it.
  */
 import { MAX_CONTENT_LENGTH, REGBY_CODE_RE } from './protocol.ts';
 import { required } from './env.ts';
@@ -22,8 +24,9 @@ export const AUDIT_EVENTS = [
   'redeem',
   'redeem_refused',
   'blacklisted',
-  // Not a request: the notice sent to the merchant after a redeem. `pubkey` and
-  // `requestEvent` are the merchant's and their original request's.
+  // Not a request: a notice sent to the merchant, one per distinct customer who
+  // sent the code inside its validity (`reason` = `conflict` for a refused one).
+  // `pubkey` and `requestEvent` are the merchant's and their original request's.
   'merchant_notified',
 ] as const;
 
@@ -40,9 +43,11 @@ export interface AuditRecord {
   /** Id of the inbound Nostr event this record answers. */
   requestEvent: string;
   code: string | null;
-  /** Full content, opaque; only on a served request (see header). */
+  /** Full content, opaque; only on a served request or a delivered notice (see header). */
   content: string | null;
-  /** Why a request was refused: `expired`, `redeemed`, `locked`, `not-found`, `guessing`. */
+  /** Why a request was refused: `expired`, `redeemed`, `locked`, `not-found`, `guessing`.
+   *  On `merchant_notified`, `conflict` marks the notice about a refused customer;
+   *  on `redeem`, `repeat` marks the winner served again inside the minute. */
   reason: string | null;
   /** Whether the reply reached a relay; null when none was sent. */
   delivered: boolean | null;
