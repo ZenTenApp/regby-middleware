@@ -1,9 +1,11 @@
-# Test, then deploy main to the server: knock the firewall open, SSH in,
-# fast-forward the checkout to the tested commit and rebuild with docker
-# compose. Which services start (broker alone, or broker + audit sink) is the
-# server's call, through COMPOSE_FILE in its .env (see docs/deployment.md).
+# Test, then deploy to the server: `main` to production, `staging` to the
+# staging stack beside it. Knock the firewall open, SSH in, fast-forward the
+# branch's checkout to the tested commit and rebuild with docker compose.
+# Production's services (broker alone, or broker + audit sink) are the server's
+# call, through COMPOSE_FILE in its .env; staging always runs
+# docker-compose.staging.yml (see docs/deployment.md).
 #
-# Secrets (Settings > Environments > production):
+# Secrets (Settings > Environments > production), shared by both deploys:
 #   DEPLOY_HOST          server IP or hostname
 #   DEPLOY_USER          SSH user, in the docker group
 #   DEPLOY_SSH_KEY       private key for that user (ed25519, no passphrase)
@@ -12,6 +14,8 @@
 #   DEPLOY_SSH_PORT      SSH port behind the knock
 #   DEPLOY_KNOCK_PORTS   knock sequence, space separated, in order (TCP)
 #   DEPLOY_PATH          absolute path of the repo checkout on the server
+#   DEPLOY_PATH_STAGING  the staging checkout, which a staging push deploys
+#                        instead; must differ from DEPLOY_PATH
 # The port values are secrets on purpose: a knock sequence anyone with repo
 # read access can see no longer hides the SSH port.
 #
@@ -21,15 +25,18 @@ name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# One deploy at a time; a newer push waits for the running one, never cancels it mid-rebuild.
+# One deploy per branch at a time; a newer push waits for the running one,
+# never cancels it mid-rebuild. Per branch, not per host: a shared group keeps
+# only one pending run, so a production push would silently drop a waiting
+# staging deploy. The host itself runs one deploy at a time (flock in deploy.sh).
 concurrency:
-  group: deploy-production
+  group: deploy-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -47,9 +54,10 @@ jobs:
 
   deploy:
     needs: test
-    # A manual run from another branch would test that branch but ship main.
-    if: github.ref == 'refs/heads/main'
+    # A manual run from any other branch only tests it.
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging'
     runs-on: ubuntu-latest
+    # Staging too: it reuses production's connection secrets.
     environment: production
     timeout-minutes: 20
     env:
@@ -57,7 +65,13 @@ jobs:
       SSH_USER: ${{ secrets.DEPLOY_USER }}
       SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
       KNOCK_PORTS: ${{ secrets.DEPLOY_KNOCK_PORTS }}
-      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      # Picked by name, not `cond && a || b`: that falls through to b when a is
+      # empty, so an unset staging path would deploy staging into production.
+      DEPLOY_PATH: ${{ secrets[github.ref_name == 'staging' && 'DEPLOY_PATH_STAGING' || 'DEPLOY_PATH'] }}
+      PRODUCTION_PATH: ${{ secrets.DEPLOY_PATH }}
+      BRANCH: ${{ github.ref_name }}
+      # Empty for production, which keeps the server's own COMPOSE_FILE.
+      STACK_COMPOSE_FILE: ${{ github.ref_name == 'staging' && 'docker-compose.staging.yml' || '' }}
     steps:
       - name: Check secrets and install SSH keys
         env:
@@ -68,8 +82,12 @@ jobs:
           # silent no-op knock or an `ssh -p ""` error three attempts later.
           : "${HOST:?DEPLOY_HOST not set}" "${SSH_USER:?DEPLOY_USER not set}" \
             "${SSH_PORT:?DEPLOY_SSH_PORT not set}" "${KNOCK_PORTS:?DEPLOY_KNOCK_PORTS not set}" \
-            "${DEPLOY_PATH:?DEPLOY_PATH not set}" "${SSH_KEY:?DEPLOY_SSH_KEY not set}" \
-            "${KNOWN_HOSTS:?DEPLOY_KNOWN_HOSTS not set}"
+            "${DEPLOY_PATH:?DEPLOY_PATH (DEPLOY_PATH_STAGING for staging) not set}" \
+            "${SSH_KEY:?DEPLOY_SSH_KEY not set}" "${KNOWN_HOSTS:?DEPLOY_KNOWN_HOSTS not set}"
+          if [ "$BRANCH" = staging ] && [ "$DEPLOY_PATH" = "$PRODUCTION_PATH" ]; then
+            echo "::error::DEPLOY_PATH_STAGING must not be the production checkout"
+            exit 1
+          fi
           # The path travels through the server's login shell unquoted, so
           # allow only characters no shell treats specially.
           if ! [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
@@ -85,12 +103,24 @@ jobs:
         run: |
           cat > "$RUNNER_TEMP/deploy.sh" <<'REMOTE'
           set -euo pipefail
+          # One deploy at a time on the host, production or staging: each ends
+          # with an image prune that would otherwise delete the other's
+          # rollback image mid-check. Held until this script exits.
+          if command -v flock >/dev/null; then
+            exec 9>/tmp/regby-deploy.lock
+            flock 9
+          fi
           deploy_path=$1
           sha=$2
+          branch=$3
+          # Absent for production: an exported COMPOSE_FILE would override the
+          # one in the server's .env, which decides whether the audit sink runs.
+          compose_file=${4:-}
+          if [ -n "$compose_file" ]; then export COMPOSE_FILE=$compose_file; fi
           cd "$deploy_path"
-          git fetch --quiet origin main
-          git checkout --quiet main
-          # The tested commit, not whatever main is now: a newer push gets its
+          git fetch --quiet origin "$branch"
+          git checkout --quiet "$branch"
+          # The tested commit, not whatever the branch is now: a newer push gets its
           # own run after its own tests. Fast-forward only, so a diverged
           # checkout stops the deploy, and an older sha is a no-op.
           git merge --ff-only --quiet "$sha"
@@ -142,7 +172,7 @@ jobs:
             ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" \
               -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=10 \
               -o ServerAliveInterval=30 "$SSH_USER@$HOST" \
-              bash -s -- "$DEPLOY_PATH" "$GITHUB_SHA" < "$RUNNER_TEMP/deploy.sh" || rc=$?
+              bash -s -- "$DEPLOY_PATH" "$GITHUB_SHA" "$BRANCH" "$STACK_COMPOSE_FILE" < "$RUNNER_TEMP/deploy.sh" || rc=$?
             if [ "$rc" -ne 255 ]; then exit "$rc"; fi
             echo "SSH not reachable (attempt $attempt), knocking again"
             sleep 3

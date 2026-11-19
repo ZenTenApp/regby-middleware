@@ -1,0 +1,22 @@
+# Staging broker: the `staging` branch in its own checkout on the production
+# host, with its own key (.env.staging) and code store, and no audit sink.
+#   docker compose -f docker-compose.staging.yml up -d --build
+#
+# Docker's project, container and image names are host-wide, not per folder,
+# so all three differ from production's: two checkouts both named
+# `regby-middleware` would otherwise be one compose project, and a staging
+# deploy would replace the production container.
+name: regby-staging
+
+services:
+  regby:
+    build: .
+    image: regby-middleware-staging
+    container_name: regby-staging
+    restart: unless-stopped
+    env_file: .env.staging
+    environment:
+      # Beats env_file: a stray REGBY_DB_PATH can't move the store off the mount.
+      REGBY_DB_PATH: /data/regby.db
+    volumes:
+      - ./data:/data

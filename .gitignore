@@ -1,8 +1,10 @@
 node_modules/
 dist/
+# Every env file holds keys or credentials; only the documented examples are tracked.
 .env
-.env.local
-.env.audit-sink
+.env.*
+!.env.example
+!.env.*.example
 *.log
 .DS_Store
 # SQLite code store (+ WAL/SHM sidecars)

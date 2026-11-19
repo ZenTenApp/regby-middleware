@@ -100,12 +100,14 @@ Every push to `main` runs [`.github/workflows/deploy.yml`](../.github/workflows/
 5. Prune dangling images only after the check passes, so the previous image
    stays available for a manual rollback.
 
-Branch flow: features branch from `staging` and merge into it; `staging` is
+Branch flow: features branch from `staging` and merge into it; a push to
+`staging` deploys the [staging stack](#staging) the same way. `staging` is
 merged into `main` to release.
 
 ### Secrets
 
-Set under **Settings > Environments > production**:
+Set under **Settings > Environments > production**; staging deploys reuse
+them all except the path:
 
 | secret | value |
 | --- | --- |
@@ -116,6 +118,7 @@ Set under **Settings > Environments > production**:
 | `DEPLOY_SSH_PORT` | SSH port behind the knock |
 | `DEPLOY_KNOCK_PORTS` | knock sequence, space separated, TCP |
 | `DEPLOY_PATH` | absolute path of the checkout on the server |
+| `DEPLOY_PATH_STAGING` | absolute path of the [staging](#staging) checkout; must differ from `DEPLOY_PATH` |
 
 ### Server prerequisites for CI
 
@@ -126,8 +129,39 @@ Set under **Settings > Environments > production**:
   problem.
 - The firewall must accept `ESTABLISHED,RELATED` before the knock rule, or a
   long build drops the SSH session when the knock window closes.
-- The checkout must stay on `main` with no local commits; the fast-forward
-  refuses a diverged tree and fails the deploy.
+- Each checkout must stay on its branch (`main`, or `staging`) with no local
+  commits; the fast-forward refuses a diverged tree and fails the deploy.
+
+### Staging
+
+A second checkout on the same host runs the `staging` branch from
+[`docker-compose.staging.yml`](../docker-compose.staging.yml): the broker alone,
+no audit sink, with its own key and code store. Its compose project, container
+and image are all named `regby-staging` or `regby-middleware-staging`, because
+Docker names are host-wide: two checkouts both called `regby-middleware` would
+otherwise be one compose project, and a staging deploy would replace the
+production container.
+
+```bash
+git clone <repo> /opt/regby-staging && cd /opt/regby-staging
+git checkout staging
+git config core.sshCommand "ssh -i ~/.ssh/<deploy key> -o IdentitiesOnly=yes"
+
+cp .env.example .env.staging
+#   a NEW REGBY_PRIVATE_KEY (openssl rand -hex 32), never production's;
+#   REGBY_EXPECTED_PUBKEY, REGBY_RELAYS; leave REGBY_AUDIT_URL unset
+chmod 600 .env.staging
+
+docker compose -f docker-compose.staging.yml up -d --build
+docker compose -f docker-compose.staging.yml logs regby | grep -E 'booting|Broker started'
+```
+
+The boot log's `pubkey` is the staging broker's; the staging web build points
+at it. The relays can be production's: requests are addressed to the broker's
+own pubkey, so the two brokers never answer each other's events.
+
+Every manual command needs `-f docker-compose.staging.yml`; without it,
+compose reads production's file, which fails on the missing `.env`.
 
 ### Rollback
 

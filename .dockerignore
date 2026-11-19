@@ -1,9 +1,7 @@
 node_modules
 dist
 .git
-.env
-.env.local
-.env.audit-sink
+.env*
 data
 *.db
 *.db-wal
