@@ -146,12 +146,12 @@ Event:
 {
   "kind": 4,
   "pubkey": "4014be77...ac0951",
-  "created_at": 1750579231,
+  "created_at": 1750579232,
   "tags": [
     ["p","a1a1...a1a1"],
     ["e","a19a7a4f...0011111"],
     ["i","regby_content_delivered"],
-    ["expiration","1750838371"],
+    ["expiration","1750838372"],
     ["client","regby-middleware"],
     ["regby_code","42891337"],
     ["to","c0c0...c0c0"]
@@ -162,8 +162,9 @@ Event:
 ```
 `e` is the merchant's own hop 1 event, so the POS can match the notice to the
 code it is showing. `to` is the customer's hex pubkey, in plaintext.
-`created_at` is the moment the server counted that customer, not when it
-published. An app that predates this intent drops the event as unknown.
+`created_at` is one second past hop 4's, which is the moment the server
+counted that customer, not when it published, so every client lists hop 4
+first. An app that predates this intent drops the event as unknown.
 
 ## Another customer inside the minute
 
@@ -199,12 +200,12 @@ with empty content: the intent and the `to` tag say it all.
 {
   "kind": 4,
   "pubkey": "4014be77...ac0951",
-  "created_at": 1750579232,
+  "created_at": 1750579233,
   "tags": [
     ["p","a1a1...a1a1"],
     ["e","a19a7a4f...0011111"],
     ["i","regby_conflict"],
-    ["expiration","1750838372"],
+    ["expiration","1750838373"],
     ["client","regby-middleware"],
     ["regby_code","42891337"],
     ["to","d0d0...d0d0"]
@@ -223,9 +224,10 @@ with empty content: the intent and the `to` tag say it all.
   inside the minute gets hop 4 again; a refused customer gets
   `regby_code_already_redeemed` again. Neither causes a further notice.
 - The intent alone says who got the content, whatever order the notices
-  arrive in. The server also stamps each notice for the code at least one
-  second after the previous one, so they keep the order the customers arrived
-  in.
+  arrive in. The server also dates each notice at least one second after
+  the customer's own reply and after the code's previous notice, so clients
+  list each reply before its notice and the notices in the order the
+  customers arrived in.
 - A customer past the minute, the winner included, gets `regby_code_expired`
   and the merchant hears nothing.
 

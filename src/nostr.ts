@@ -52,8 +52,9 @@ export interface ReplyOptions {
   extraTags?: readonly string[][];
   /**
    * Unix seconds for `created_at`, which also anchors the NIP-40 expiration.
-   * Defaults to now. Set when the stamp carries meaning, like the order of a
-   * code's merchant notices.
+   * Defaults to now. Set when the stamp carries meaning: a customer's reply
+   * listing before the merchant notice it causes, and a code's notices in
+   * arrival order.
    */
   createdAt?: number;
 }

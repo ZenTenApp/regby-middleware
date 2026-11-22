@@ -220,12 +220,12 @@ Event 5, broker to merchant:
 {
   "kind": 4,
   "pubkey": "<broker>",
-  "created_at": 1750579231,
+  "created_at": 1750579232,
   "tags": [
     ["p", "<merchant>"],
     ["e", "<event 1 id>"],
     ["i", "regby_content_delivered"],
-    ["expiration", "1750838371"],
+    ["expiration", "1750838372"],
     ["client", "regby-middleware"],
     ["regby_code", "42891337"],
     ["to", "<customer>"]
@@ -243,12 +243,12 @@ notice:
 {
   "kind": 4,
   "pubkey": "<broker>",
-  "created_at": 1750579232,
+  "created_at": 1750579233,
   "tags": [
     ["p", "<merchant>"],
     ["e", "<event 1 id>"],
     ["i", "regby_conflict"],
-    ["expiration", "1750838372"],
+    ["expiration", "1750838373"],
     ["client", "regby-middleware"],
     ["regby_code", "42891337"],
     ["to", "<second customer>"]
@@ -322,9 +322,12 @@ about the conflict; the merchant tells them in person.
 - `regby_conflict` carries no text (`""`).
 - A pubkey already named in a conflict that sends the code again gets
   `regby_code_already_redeemed` again, and the merchant no further notice.
-- The broker MUST stamp the notices of a code with `created_at` values at
-  least one second apart, in the order their customers arrived, even when two
-  customers send the code in the same second.
+- The broker MUST date each notice at least one second after the customer's
+  own reply (event 4 or the refusal), so clients that list by `created_at`
+  show the reply first.
+- The broker MUST date the notices of a code at least one second apart, in
+  the order their customers arrived, even when two customers send the code in
+  the same second.
 - An event 3 past the first minute gets `regby_code_expired`, the winner's
   included, and no notice.
 

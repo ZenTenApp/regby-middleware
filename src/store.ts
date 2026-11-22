@@ -42,11 +42,13 @@
  * validity, the winner and each one refused as `redeemed`, gets one row in
  * `redeemers`, so the merchant is notified once per customer (the winner's
  * `regby_content_delivered`, a `regby_conflict` for each refused one).
- * Its `notice_at` is that notice's `created_at`: the attempt time, but at least
- * one second past the code's previous notice, so the notices keep the order
- * their customers arrived in even within one second. A customer already
- * counted gets no second notice. Rows are deleted with their
- * code and wiped from archives like the origin and `redeemed_by`.
+ * Its `notice_at` is that notice's `created_at`: one second past the later of
+ * the attempt and the code's previous notice. Clients list events by
+ * `created_at`, so the customer's own reply, dated at the attempt, always
+ * lists before the notice it causes, and the notices keep the order their
+ * customers arrived in even within one second. A customer already counted
+ * gets no second notice. Rows are deleted with their code and wiped from
+ * archives like the origin and `redeemed_by`.
  *
  * **Content stays for debugging**: a row keeps its content and origin until it is
  * deleted with the row, 72 h after issue, so the live file shows what every
@@ -89,7 +91,9 @@ export type RedeemFailureReason = 'not-found' | 'locked' | 'expired' | 'redeemed
  */
 export interface MerchantNotice {
   origin: CodeOrigin;
-  /** Unix seconds for the notice's `created_at`, strictly increasing per code. */
+  /** Unix seconds for the customer's own reply's `created_at`: the attempt. */
+  replyAt: number;
+  /** Unix seconds for the notice's `created_at`: past `replyAt`, strictly increasing per code. */
   at: number;
 }
 
@@ -257,11 +261,11 @@ export class CodeStore implements CodeStoreLike {
          AND (content != '' OR ${HAS_ORIGIN_SQL}) AND expires_at > ?1`,
     );
     // Counts a customer once per code. A row comes back only for a pubkey not
-    // yet counted, stamped at least a second past the code's last notice; an
-    // aggregate over no rows still yields one, so the first is stamped now.
+    // yet counted, stamped a second past both the attempt and the code's last
+    // notice; an aggregate over no rows still yields one, so the first is now + 1.
     this.redeemerStmt = this.db.prepare(
       `INSERT OR IGNORE INTO redeemers (code, pubkey, notice_at)
-         SELECT ?1, ?2, MAX(?3, COALESCE(MAX(notice_at) + 1, ?3)) FROM redeemers WHERE code = ?1
+         SELECT ?1, ?2, MAX(?3, COALESCE(MAX(notice_at), ?3)) + 1 FROM redeemers WHERE code = ?1
          RETURNING notice_at`,
     );
     // Runs before `sweepStmt`, so a number freed for reuse leaves no redeemers behind.
@@ -350,7 +354,7 @@ export class CodeStore implements CodeStoreLike {
     // No merchant to notify, so no reason to keep the customer's pubkey either.
     if (origin === null) return null;
     const counted = this.redeemerStmt.get(code, customerPubkey, now) as { notice_at: number } | undefined;
-    return counted ? { origin, at: counted.notice_at } : null;
+    return counted ? { origin, replyAt: now, at: counted.notice_at } : null;
   }
 
   /** Drop rows, content and redeemers included, past the 72 h reuse window. */

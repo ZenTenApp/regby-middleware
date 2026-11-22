@@ -25,9 +25,9 @@ const SECOND = 'f'.repeat(64);
 const THIRD = '1'.repeat(64);
 const FOURTH = '2'.repeat(64);
 
-/** A winning redeem at `at`, its merchant notice stamped then. */
+/** A winning redeem at `at`: its reply dated then, its merchant notice a second later. */
 function served(content: string, at: number, origin: CodeOrigin = ORIGIN): RedeemResult {
-  return { ok: true, content, origin, notice: { origin, at }, repeat: false };
+  return { ok: true, content, origin, notice: { origin, replyAt: at, at: at + 1 }, repeat: false };
 }
 
 /** The winner asking again inside the minute: served again, no second notice. */
@@ -40,9 +40,9 @@ function servedLegacy(content: string): RedeemResult {
   return { ok: true, content, origin: null, notice: null, repeat: false };
 }
 
-/** Another customer refused as `redeemed`, counted for the first time, its notice stamped `at`. */
-function refused(at: number): RedeemResult {
-  return { ok: false, reason: 'redeemed', notice: { origin: ORIGIN, at } };
+/** Another customer refused as `redeemed` at `replyAt`, counted for the first time, its notice dated `at`. */
+function refused(replyAt: number, at: number): RedeemResult {
+  return { ok: false, reason: 'redeemed', notice: { origin: ORIGIN, replyAt, at } };
 }
 
 /** A customer refused as `redeemed` already counted (or on a code with no origin): no notice. */
@@ -111,7 +111,7 @@ test('redeem is single-use: another customer reports redeemed, the winner is ser
   assert.ok(minted);
   clock.tick(30);
   assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', clock.now()));
-  assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now() + 1));
+  assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now(), clock.now() + 2));
   // The winner's retry (a lost reply, a reload) is not a second use.
   assert.deepEqual(store.redeem(minted.code, CUSTOMER), again('defito://base/0xabc'));
   assert.deepEqual(store.redeem(minted.code, SECOND), REFUSED_QUIET);
@@ -125,7 +125,7 @@ test('a redeemed code reads redeemed inside its minute, then by age like any oth
   assert.ok(minted);
   assert.ok(store.redeem(minted.code, CUSTOMER).ok);
   clock.tick(TTL - 1);
-  assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now()));
+  assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now(), clock.now() + 1));
   assert.deepEqual(store.redeem(minted.code, CUSTOMER), again('defito://base/0xabc'));
   clock.tick(1); // at the validity boundary: the later state wins, for the winner too
   assert.deepEqual(store.redeem(minted.code, CUSTOMER), { ok: false, reason: 'expired' });
@@ -194,7 +194,7 @@ test('a consumed code stays consumed when the wall clock steps backward', () => 
   clock.tick(60);
   assert.ok(store.redeem(minted.code, CUSTOMER).ok);
   clock.tick(-30); // NTP correction / VM restore lands before the consume
-  assert.deepEqual(store.redeem(minted.code, SECOND), refused(1061));
+  assert.deepEqual(store.redeem(minted.code, SECOND), refused(1060, 1062));
 });
 
 test('content leaves the db and its -wal log with its row, at the end of the reuse window', () => {
@@ -359,7 +359,7 @@ test('a code minted just before midnight still redeems after it, once', () => {
     clock.tick(40); // 00:00:10 next day, still inside the code's minute
     assert.notEqual(dailyDbPath(base, clock.now()), day1);
     assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', clock.now()));
-    assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now() + 1));
+    assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now(), clock.now() + 2));
     store.close();
     // The archived file kept no invoice; the live copy crossed over.
     assert.deepEqual([...contentOnDisk(day1).values()], ['']);
@@ -542,7 +542,7 @@ test('a code for empty content redeems once, like any other', () => {
   const minted = store.mint('', clock.now(), ORIGIN);
   assert.ok(minted);
   assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('', clock.now()));
-  assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now() + 1));
+  assert.deepEqual(store.redeem(minted.code, SECOND), refused(clock.now(), clock.now() + 2));
   assert.deepEqual(store.redeem(minted.code, CUSTOMER), again(''));
 });
 
@@ -689,7 +689,7 @@ test('a redeem recorded in any carried copy wins, whatever order the copies land
     assert.ok(src.redeem(minted.code, CUSTOMER).ok);
     src.close();
     today.carryFrom(source); // same code again, now redeemed, its winner with it
-    assert.deepEqual(today.redeem(minted.code, SECOND), refused(at + 1));
+    assert.deepEqual(today.redeem(minted.code, SECOND), refused(at, at + 2));
     assert.deepEqual(today.redeem(minted.code, CUSTOMER), again('defito://base/0xabc'));
     today.close();
     rmDb(source);
@@ -717,12 +717,12 @@ test('each distinct customer inside the minute gets one notice, the winner stamp
   assert.ok(minted);
   clock.tick(5);
   assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', 1005));
-  // Same second: refused, but stamped a second after the winner so the two never tie.
-  assert.deepEqual(store.redeem(minted.code, SECOND), refused(1006));
-  assert.deepEqual(store.redeem(minted.code, THIRD), refused(1007));
-  // Past the last stamp: stamped at its own time.
+  // Same second: refused, but dated a second after the winner's notice so the two never tie.
+  assert.deepEqual(store.redeem(minted.code, SECOND), refused(1005, 1007));
+  assert.deepEqual(store.redeem(minted.code, THIRD), refused(1005, 1008));
+  // Past the last notice: dated a second after its own attempt.
   clock.tick(20);
-  assert.deepEqual(store.redeem(minted.code, FOURTH), refused(1025));
+  assert.deepEqual(store.redeem(minted.code, FOURTH), refused(1025, 1026));
   // A refused customer already counted is refused again with no second notice;
   // the winner is served again, with none either.
   for (const pubkey of [SECOND, THIRD, FOURTH]) {
@@ -738,10 +738,10 @@ test('notices are counted per code: another code\'s customers do not shift the s
   const second = store.mint('defito://second', clock.now(), ORIGIN);
   assert.ok(first && second);
   assert.deepEqual(store.redeem(first.code, CUSTOMER), served('defito://first', 1000));
-  assert.deepEqual(store.redeem(first.code, SECOND), refused(1001));
+  assert.deepEqual(store.redeem(first.code, SECOND), refused(1000, 1002));
   // The same two customers on the other code, in the other order, same second.
   assert.deepEqual(store.redeem(second.code, SECOND), served('defito://second', 1000));
-  assert.deepEqual(store.redeem(second.code, CUSTOMER), refused(1001));
+  assert.deepEqual(store.redeem(second.code, CUSTOMER), refused(1000, 1002));
 });
 
 test('a customer past the minute, or on an unknown code, is neither served nor counted', () => {
@@ -786,7 +786,7 @@ test('redeemers leave with their code at the end of the reuse window, so a reiss
     const minted = store.mint('defito://base/0xabc', clock.now(), ORIGIN);
     assert.ok(minted);
     assert.ok(store.redeem(minted.code, CUSTOMER).ok);
-    assert.deepEqual(store.redeem(minted.code, SECOND), refused(1001));
+    assert.deepEqual(store.redeem(minted.code, SECOND), refused(1000, 1002));
     clock.tick(CODE_REUSE_SECONDS - 1);
     store.sweep();
     store.close();
@@ -809,12 +809,12 @@ test('a customer counted before midnight is not counted again after it, and the 
     assert.ok(minted);
     clock.tick(5);
     assert.deepEqual(store.redeem(minted.code, CUSTOMER), served('defito://base/0xabc', BEFORE_MIDNIGHT + 5));
-    assert.deepEqual(store.redeem(minted.code, SECOND), refused(BEFORE_MIDNIGHT + 6));
+    assert.deepEqual(store.redeem(minted.code, SECOND), refused(BEFORE_MIDNIGHT + 5, BEFORE_MIDNIGHT + 7));
     clock.tick(35); // 00:00:10 next day, still inside the code's minute
     assert.notEqual(dailyDbPath(base, clock.now()), day1);
     assert.deepEqual(store.redeem(minted.code, CUSTOMER), again('defito://base/0xabc'));
     assert.deepEqual(store.redeem(minted.code, SECOND), REFUSED_QUIET);
-    assert.deepEqual(store.redeem(minted.code, THIRD), refused(BEFORE_MIDNIGHT + 40));
+    assert.deepEqual(store.redeem(minted.code, THIRD), refused(BEFORE_MIDNIGHT + 40, BEFORE_MIDNIGHT + 41));
     store.close();
     assert.deepEqual(redeemersOnDisk(day1), []);
     assert.deepEqual(redeemedOnDisk(day1, minted.code), { at: BEFORE_MIDNIGHT + 5, by: null });

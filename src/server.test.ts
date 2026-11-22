@@ -176,21 +176,23 @@ test('a redeem names the merchant to the customer and notifies the merchant with
     await transport.redeem('3', CUSTOMER, code);
 
     const [, toCustomer, toMerchant] = transport.sent;
-    // Event 4: the invoice, tagged with who it is from.
+    // Event 4: the invoice, tagged with who it is from, dated when the store
+    // counted the customer.
     assert.deepEqual(toCustomer, {
       target: { recipientPubkey: CUSTOMER, requestEventId: '3'.repeat(64) },
       intent: 'regby_content',
       content: INVOICE,
       extraTags: [[CODE_TAG, code], [FROM_TAG, MERCHANT]],
+      createdAt: clock.at,
     });
     // Event 5: the same invoice to the merchant, on their own request's
-    // thread, stamped when the store counted the customer.
+    // thread, dated a second after event 4 so every client lists it after.
     assert.deepEqual(toMerchant, {
       target: { recipientPubkey: MERCHANT, requestEventId: '1'.repeat(64) },
       intent: 'regby_content_delivered',
       content: INVOICE,
       extraTags: [[CODE_TAG, code], [TO_TAG, CUSTOMER]],
-      createdAt: clock.at,
+      createdAt: clock.at + 1,
     });
     assert.deepEqual(
       audit.entries.map((e) => [e.event, e.pubkey, e.content, e.delivered]),
@@ -248,15 +250,16 @@ test('a second customer inside the minute is refused as already redeemed, and th
       intent: 'regby_code_already_redeemed',
       content: '',
       extraTags: [[CODE_TAG, code]],
+      createdAt: clock.at,
     });
-    // The winner's notice echoes the content; the conflict is empty. The
-    // stamps keep the order the customers arrived in.
+    // The winner's notice echoes the content; the conflict is empty. Each is
+    // dated past its customer's reply, in the order the customers arrived.
     const notices = transport.sent.filter((r) => r.target.recipientPubkey === MERCHANT && r.intent !== 'regby_code');
     assert.deepEqual(
       notices.map((r) => [r.intent, r.target.requestEventId, r.content, r.extraTags, r.createdAt]),
       [
-        ['regby_content_delivered', '1'.repeat(64), INVOICE, [[CODE_TAG, code], [TO_TAG, CUSTOMER]], clock.at],
-        ['regby_conflict', '1'.repeat(64), '', [[CODE_TAG, code], [TO_TAG, SECOND_CUSTOMER]], clock.at + 1],
+        ['regby_content_delivered', '1'.repeat(64), INVOICE, [[CODE_TAG, code], [TO_TAG, CUSTOMER]], clock.at + 1],
+        ['regby_conflict', '1'.repeat(64), '', [[CODE_TAG, code], [TO_TAG, SECOND_CUSTOMER]], clock.at + 2],
       ],
     );
     // Only the merchant's own text is recorded as content.

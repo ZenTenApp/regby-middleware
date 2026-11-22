@@ -99,6 +99,15 @@ const CONFLICT_NOTICE: MerchantMessage = {
   record: { reason: 'conflict' },
 };
 
+/**
+ * A customer's reply is dated at their attempt when a merchant notice follows,
+ * so clients, which list by `created_at`, show the reply before the notice
+ * (dated past it). With no notice there is nothing to order: publish time.
+ */
+function replyTime(notice: MerchantNotice | null): Pick<ReplyOptions, 'createdAt'> {
+  return notice ? { createdAt: notice.replyAt } : {};
+}
+
 /** Single bucket key for the global (all-sender) limiters. */
 const GLOBAL_KEY = 'all';
 
@@ -312,15 +321,18 @@ export class ReGBYBroker {
         from,
         reason: result.reason,
       });
-      await this.answer(target, REDEEM_REFUSAL[result.reason], EMPTY_CONTENT, {
-        event: 'redeem_refused',
-        code: message.code,
-        reason: result.reason,
-      });
       // A refused customer the merchant has not heard of yet: tell the
       // merchant, so they can see their code reached more than one key.
-      if (result.reason === 'redeemed' && result.notice) {
-        await this.notifyMerchant(result.notice, message.code, target.recipientPubkey, CONFLICT_NOTICE);
+      const notice = result.reason === 'redeemed' ? result.notice : null;
+      await this.answer(
+        target,
+        REDEEM_REFUSAL[result.reason],
+        EMPTY_CONTENT,
+        { event: 'redeem_refused', code: message.code, reason: result.reason },
+        replyTime(notice),
+      );
+      if (notice) {
+        await this.notifyMerchant(notice, message.code, target.recipientPubkey, CONFLICT_NOTICE);
       }
       return;
     }
@@ -334,7 +346,7 @@ export class ReGBYBroker {
       REPLY_INTENT.request_regby_content,
       result.content,
       { event: 'redeem', code: message.code, content: result.content, ...(result.repeat ? { reason: 'repeat' } : {}) },
-      { extraTags: result.origin ? [[FROM_TAG, result.origin.merchantPubkey]] : [] },
+      { extraTags: result.origin ? [[FROM_TAG, result.origin.merchantPubkey]] : [], ...replyTime(result.notice) },
     );
     if (!delivered) {
       logger.warn('Code consumed but its reply reached no relay', {
@@ -358,7 +370,7 @@ export class ReGBYBroker {
    * request: delivered (with the content) for the one who got it, a conflict
    * for each one refused after. Stamped with the store's `notice.at`, not
    * publish time, so the notices of a code keep the order their customers
-   * arrived in.
+   * arrived in, each listed after the customer's own reply.
    */
   private async notifyMerchant(
     notice: MerchantNotice,

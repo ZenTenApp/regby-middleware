@@ -180,10 +180,13 @@ show `regby_conflict` prominently, as "check who you are dealing with",
 worded by the app itself (the notice carries no text). The refused customer
 gets the plain `regby_code_already_redeemed` failure and asks for a new code.
 
-**Notices keep arrival order.** Each notice is stamped with the moment the
-store counted its customer, and at least one second after the previous notice
-for that code, so two customers in the same second still get distinct,
-ordered stamps.
+**Replies list before notices, notices keep arrival order.** Clients list
+events by `created_at`, not by when they arrive. The customer's reply is
+dated the moment the store counted them, and the merchant's notice one second
+past both that and the code's previous notice. So event 4 (or the refusal)
+always lists before the notice it causes, and two customers in the same
+second still get distinct, ordered notices. A notice can be dated a second
+or so ahead of the clock, well inside what relays accept.
 
 ### Code store
 
