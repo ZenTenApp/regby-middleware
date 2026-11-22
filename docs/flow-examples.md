@@ -171,7 +171,7 @@ first. An app that predates this intent drops the event as unknown.
 A second customer (`d0d0...d0d0`) sends the same code one second after the
 first, while it is still inside its minute. Another pubkey already used it,
 so instead of hop 4 they get `regby_code_already_redeemed`, a plain failure
-with empty content, and the merchant gets a `regby_conflict` naming them.
+with empty content, and the merchant gets a bare `regby_conflict`.
 
 To the second customer, in place of hop 4 (`e` = their own hop 3, no `from`):
 
@@ -193,8 +193,8 @@ To the second customer, in place of hop 4 (`e` = their own hop 3, no `from`):
 }
 ```
 
-To the merchant, on their own hop 1 like hop 5 (`to` = the refused customer),
-with empty content: the intent and the `to` tag say it all.
+To the merchant, on their own hop 1 like hop 5, with empty content and no
+`to` tag: the intent alone says it all.
 
 ```json
 {
@@ -207,8 +207,7 @@ with empty content: the intent and the `to` tag say it all.
     ["i","regby_conflict"],
     ["expiration","1750838373"],
     ["client","regby-middleware"],
-    ["regby_code","42891337"],
-    ["to","d0d0...d0d0"]
+    ["regby_code","42891337"]
   ],
   "content": "",
   "id": "…", "sig": "…"

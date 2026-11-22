@@ -60,7 +60,7 @@ signature, so intents and pairing tags are authenticated too.
 | customer to broker | `request_regby_content` | `""` | `regby_code` = the code (required) |
 | broker to customer | `regby_content` | the merchant's text | `regby_code`; `from` = merchant hex pubkey |
 | broker to merchant | `regby_content_delivered` | the merchant's text, as the customer received it | `regby_code`; `to` = customer hex pubkey; `e` = the merchant's original request. Once per code |
-| broker to merchant | `regby_conflict` | `""` | `regby_code`; `to` = a customer refused after the redeem; `e` = the merchant's original request. One per such customer, see [Redeeming](#redeeming-request_regby_content) |
+| broker to merchant | `regby_conflict` | `""` | `regby_code`; `e` = the merchant's original request; no `to`. One per customer refused after the redeem, see [Redeeming](#redeeming-request_regby_content) |
 
 ### Failures
 
@@ -84,7 +84,8 @@ request. **A new intent therefore needs an app release first.**
 
 `from` and `to` are plaintext hex pubkeys, like `p`. The merchant key is the
 one that signed the request, not anything claimed inside the content. A
-refused redeem sends neither tag. `regby_code` is plaintext too.
+refused redeem sends neither tag, and neither does the merchant's
+`regby_conflict`. `regby_code` is plaintext too.
 
 Plaintext is not public on the dedicated relays: they serve a kind 4 only to
 its author and its `p` recipient (see [Read access](#read-access)). So a
@@ -105,8 +106,8 @@ Who can still read them:
 `regby_content_delivered` is sent whether or not the customer's reply reached
 a relay: the code is used up either way, so "delivered" means released by the
 broker, not received by the customer. Each other customer who sent the code
-inside its minute and was refused gets the merchant a `regby_conflict` naming
-them (see [Redeeming](#redeeming-request_regby_content)).
+inside its minute and was refused gets the merchant a bare `regby_conflict`,
+naming nobody (see [Redeeming](#redeeming-request_regby_content)).
 
 ## Behaviour
 
@@ -181,12 +182,14 @@ worded by the app itself (the notice carries no text). The refused customer
 gets the plain `regby_code_already_redeemed` failure and asks for a new code.
 
 **Replies list before notices, notices keep arrival order.** Clients list
-events by `created_at`, not by when they arrive. The customer's reply is
-dated the moment the store counted them, and the merchant's notice one second
-past both that and the code's previous notice. So event 4 (or the refusal)
-always lists before the notice it causes, and two customers in the same
-second still get distinct, ordered notices. A notice can be dated a second
-or so ahead of the clock, well inside what relays accept.
+events by `created_at`, not by when they arrive. A customer's reply that
+causes a notice is dated the moment the store counted them, and the notice
+one second past both that and the code's previous notice; a reply that
+causes none (a repeat, an already counted refusal) is dated when sent. So
+event 4 (or the refusal) always lists before the notice it causes, and two
+customers in the same second still get distinct, ordered notices. A notice
+is usually dated a second ahead of the clock; a burst of distinct customers
+on one code adds a second each, bounded by the global redeem limit.
 
 ### Code store
 

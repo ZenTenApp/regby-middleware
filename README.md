@@ -25,7 +25,7 @@ sequenceDiagram
     C->>B: request_regby_content (code tag)
     B->>C: regby_content (text, from = merchant)
     B->>M: regby_content_delivered (text, to = customer)
-    Note over M,C: regby_code_already_redeemed to each other customer who sends the code in time, regby_conflict to the merchant naming them
+    Note over M,C: regby_code_already_redeemed to each other customer who sends the code in time, a bare regby_conflict to the merchant for each
     end
     rect rgba(245, 158, 11, 0.15)
     Note over M,C: After the match: direct, the broker never sees it
@@ -43,9 +43,9 @@ The code never travels in a message's content, only in its plaintext
 `regby_code` tag. A code works once, within one minute of the merchant's
 request; inside that minute the customer who got the text can fetch it again.
 Anyone else who sends it inside that minute gets
-`regby_code_already_redeemed`, and the merchant gets a `regby_conflict`
-naming each of them, next to the one `regby_content_delivered` for the
-customer who got the text. The merchant's app shows the conflict as a
+`regby_code_already_redeemed`, and the merchant gets a bare `regby_conflict`
+(no text, no `to`) for each of them, next to the one `regby_content_delivered`
+for the customer who got the text. The merchant's app shows the conflict as a
 warning: whoever was first may have read the code off the merchant's screen.
 After the minute the code answers `regby_code_expired` until it is an hour old, then
 `regby_code_locked` until 72 h, and only then can the number be issued again.

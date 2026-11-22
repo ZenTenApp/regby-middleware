@@ -120,12 +120,12 @@ export const CONTENT_DELIVERED_INTENT = 'regby_content_delivered';
 /**
  * A conflict: a customer sent a code inside its validity after ANOTHER pubkey
  * redeemed it. A notice to the MERCHANT only (`e` = their own
- * `request_regby_code`, `to` = that customer, empty content), once per
- * distinct customer pubkey; the refused customer gets the plain
- * `regby_code_already_redeemed` failure. Whoever got the content may have read
- * the code off a screen and beaten the real customer to it, so the merchant's
- * app must show it as a warning, not a routine notice. The wording is the
- * app's own: the broker sends no text, as on a failure.
+ * `request_regby_code`, empty content, no `to`), once per distinct customer
+ * pubkey; the refused customer gets the plain `regby_code_already_redeemed`
+ * failure. Whoever got the content may have read the code off a screen and
+ * beaten the real customer to it, so the merchant's app must show it as a
+ * warning, not a routine notice. The wording is the app's own: the broker
+ * sends no text, as on a failure.
  */
 export const CONFLICT_INTENT = 'regby_conflict';
 
@@ -142,9 +142,9 @@ export type OutboundIntent =
  * Plaintext tags naming the counterparty by hex pubkey (as `p` does), so each
  * side learns who the server paired them with: `from` (the merchant) on the
  * customer's `regby_content`, `to` (the customer) on the merchant's
- * `regby_content_delivered` and `regby_conflict`. Unlike the content they are
- * NOT encrypted; they stay private only because the DM relays serve a kind 4 to
- * its author and recipient alone (docs/protocol.md, "Read access").
+ * `regby_content_delivered`. Unlike the content they are NOT encrypted; they
+ * stay private only because the DM relays serve a kind 4 to its author and
+ * recipient alone (docs/protocol.md, "Read access").
  */
 export const FROM_TAG = 'from';
 export const TO_TAG = 'to';

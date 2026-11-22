@@ -37,8 +37,8 @@ The usual payload is a `defito://` payment request.
 5. Broker to merchant: `regby_content_delivered`. Content is the text; `to`
    names the customer. Every other customer who sends event 3 while the code
    is valid gets `regby_code_already_redeemed` instead of event 4, and the
-   merchant gets a `regby_conflict` naming them. The merchant MUST show it as
-   a warning, and the exchange starts over with a new code; see
+   merchant gets a bare `regby_conflict` for each. The merchant MUST show it
+   as a warning, and the exchange starts over with a new code; see
    [Several customers](#several-customers).
 6. *Optional.* Customer to merchant, directly: the customer's first message to
    the merchant after the match, for example a `defifrom://` payment
@@ -62,7 +62,7 @@ sequenceDiagram
     C->>B: request_regby_content (code tag)
     B->>C: regby_content (text, from = merchant)
     B->>M: regby_content_delivered (text, to = customer)
-    Note over M,C: regby_code_already_redeemed to each other customer who sends the code in time, regby_conflict to the merchant naming them
+    Note over M,C: regby_code_already_redeemed to each other customer who sends the code in time, a bare regby_conflict to the merchant for each
     end
     rect rgba(245, 158, 11, 0.15)
     Note over M,C: After the match: direct, the broker never sees it
@@ -100,7 +100,7 @@ ReGBY-specific tags:
 | --- | --- | --- |
 | `regby_code` | the code | events 2, 3, 4 and 5, `regby_conflict`, and every failure except `regby_code_busy`. SHOULD on event 6. |
 | `from` | merchant pubkey | event 4 |
-| `to` | customer pubkey | event 5 and `regby_conflict` |
+| `to` | customer pubkey | event 5 |
 
 Pubkeys are 32-byte lowercase hex. All tags are plaintext; see
 [Relays](#relays).
@@ -250,8 +250,7 @@ notice:
     ["i", "regby_conflict"],
     ["expiration", "1750838373"],
     ["client", "regby-middleware"],
-    ["regby_code", "42891337"],
-    ["to", "<second customer>"]
+    ["regby_code", "42891337"]
   ],
   "content": ""
 }
@@ -316,11 +315,12 @@ about the conflict; the merchant tells them in person.
 - Any other pubkey that sends event 3 while the code is under 1 minute old
   gets `regby_code_already_redeemed` in place of event 4.
 - The broker MUST also send the merchant a `regby_conflict` once for each such
-  distinct pubkey: `e` naming event 1 and `to` naming that customer, like
-  event 5. Its own intent, so a refused customer is never read as the one who
-  got the text, even when event 5 itself is lost.
-- `regby_conflict` carries no text (`""`).
-- A pubkey already named in a conflict that sends the code again gets
+  distinct pubkey, `e` naming event 1 like event 5. Its own intent, so a
+  refused customer is never read as the one who got the text, even when
+  event 5 itself is lost.
+- `regby_conflict` carries no text (`""`) and no `to` tag: the intent alone is
+  the warning.
+- A pubkey already refused for that code that sends it again gets
   `regby_code_already_redeemed` again, and the merchant no further notice.
 - The broker MUST date each notice at least one second after the customer's
   own reply (event 4 or the refusal), so clients that list by `created_at`
@@ -367,7 +367,7 @@ Merchant clients:
   `created_at`.
 - MUST recognise event 5 and `regby_conflict` by their `e` tag naming their
   event 1. Event 5 names the customer who received the text; each conflict
-  names a customer who was refused.
+  stands for one more customer who was refused, unnamed.
 - MUST show a prominent warning on any `regby_conflict`: more than one pubkey
   typed the code, and the one named in event 5 may not be the customer in
   front of them.
@@ -467,9 +467,9 @@ For each code, a merchant client SHOULD store a record of its event 5:
 | `content` | the text it sent in event 1 |
 | `matched_at` | the `created_at` of event 5 |
 
-- One record per code. A `regby_conflict` names a customer who was refused;
-  a client shows it as a warning, but MUST NOT record it as a match. Since a
-  conflict voids the exchange, the client SHOULD also drop the code's record
+- One record per code. A `regby_conflict` stands for a customer who was
+  refused; a client shows it as a warning, but MUST NOT record it as a match.
+  Since a conflict voids the exchange, the client SHOULD also drop the code's record
   from event 5, so whoever got the text is not recognised by it.
 - The same customer can have many records with different codes.
 - A record MUST NOT be looked up by `code` alone, because codes are reused
@@ -517,9 +517,9 @@ The reference relays are `wss://dm1.zentext.me`, `wss://dm2.nostr.box` and
 - **Codes are guessable in principle.** There are 10^8 codes, each valid for
   one minute; rate limits and blocking repeat guessers keep guessing
   impractical.
-- **Typing a code reveals your pubkey to the merchant.** Every customer who
-  sends a live code is named to the merchant, in event 5 or a
-  `regby_conflict`, including those refused because someone else was first.
+- **Getting the text reveals your pubkey to the merchant.** The customer who
+  gets it is named in event 5. One refused because someone else was first is
+  not named: a `regby_conflict` only tells the merchant one more pubkey tried.
 - **A conflict may mean the code was intercepted.** Whoever types a live code
   first gets the text, so someone who reads it off the merchant's screen can
   beat the real customer to it. That is why the merchant MUST be warned on a

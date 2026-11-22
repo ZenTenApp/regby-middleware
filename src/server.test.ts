@@ -252,14 +252,14 @@ test('a second customer inside the minute is refused as already redeemed, and th
       extraTags: [[CODE_TAG, code]],
       createdAt: clock.at,
     });
-    // The winner's notice echoes the content; the conflict is empty. Each is
-    // dated past its customer's reply, in the order the customers arrived.
+    // The winner's notice echoes the content and names them; the conflict is
+    // bare. Each is dated past its customer's reply, in arrival order.
     const notices = transport.sent.filter((r) => r.target.recipientPubkey === MERCHANT && r.intent !== 'regby_code');
     assert.deepEqual(
       notices.map((r) => [r.intent, r.target.requestEventId, r.content, r.extraTags, r.createdAt]),
       [
         ['regby_content_delivered', '1'.repeat(64), INVOICE, [[CODE_TAG, code], [TO_TAG, CUSTOMER]], clock.at + 1],
-        ['regby_conflict', '1'.repeat(64), '', [[CODE_TAG, code], [TO_TAG, SECOND_CUSTOMER]], clock.at + 2],
+        ['regby_conflict', '1'.repeat(64), '', [[CODE_TAG, code]], clock.at + 2],
       ],
     );
     // Only the merchant's own text is recorded as content.

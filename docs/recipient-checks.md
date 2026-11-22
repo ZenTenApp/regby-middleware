@@ -81,8 +81,8 @@ These did not exist when the middleware judged content.
    pubkey already redeemed, inside its minute, gets the plain
    `regby_code_already_redeemed` failure. The merchant gets a
    `regby_conflict`, besides the one `regby_content_delivered`, for every
-   such customer (`e` = their own request, `to` = that customer), with empty
-   content. The merchant's app MUST show its own warning prominently: the
+   such customer (`e` = their own request), with empty content and no `to`
+   tag. The merchant's app MUST show its own warning prominently: the
    first to type a live code may be an onlooker who read it off the
    merchant's screen, so the refused customer can be the real one.
    Only the delivered notice is a match

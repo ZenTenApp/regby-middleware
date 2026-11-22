@@ -10,9 +10,9 @@
  *                           `i:regby_content_delivered` (the stored content).
  *                           Any other customer inside the minute gets
  *                           `i:regby_code_already_redeemed`, and the merchant
- *                           `i:regby_conflict` (empty content), once per such
- *                           customer. Each notice is tagged `to` = that
- *                           customer.
+ *                           `i:regby_conflict` (empty content, no `to`), once
+ *                           per such customer. The delivered notice is tagged
+ *                           `to` = the customer who got the content.
  * Content is opaque: never judged here, only carried (see `protocol.ts`).
  * A failure replies with its own `FAILURE_INTENT` and empty content. Every
  * reply links to the request via the `e` tag, and every reply about a code
@@ -80,22 +80,24 @@ export interface BrokerDeps {
   auditSink: AuditSink;
 }
 
-/** A merchant notice: its intent and content, and what its audit row adds to the code. */
+/** A merchant notice: its intent, content and tags, and what its audit row adds to the code. */
 interface MerchantMessage {
   intent: OutboundIntent;
   content: string;
+  extraTags: readonly string[][];
   record: Pick<AuditFields, 'content' | 'reason'>;
 }
 
 /**
- * The notice about a refused customer. Its content is empty (the intent and
- * `to` tag say it all), so its row records none. Both notices audit as
- * `merchant_notified`, since a sink validates event names against its own
- * build; this one is told apart by `reason`, which is free text.
+ * The notice about a refused customer. Bare: no content and no `to`, the
+ * intent alone is the warning, so its row records no content. Both notices
+ * audit as `merchant_notified`, since a sink validates event names against its
+ * own build; this one is told apart by `reason`, which is free text.
  */
 const CONFLICT_NOTICE: MerchantMessage = {
   intent: CONFLICT_INTENT,
   content: EMPTY_CONTENT,
+  extraTags: [],
   record: { reason: 'conflict' },
 };
 
@@ -321,8 +323,6 @@ export class ReGBYBroker {
         from,
         reason: result.reason,
       });
-      // A refused customer the merchant has not heard of yet: tell the
-      // merchant, so they can see their code reached more than one key.
       const notice = result.reason === 'redeemed' ? result.notice : null;
       await this.answer(
         target,
@@ -331,8 +331,10 @@ export class ReGBYBroker {
         { event: 'redeem_refused', code: message.code, reason: result.reason },
         replyTime(notice),
       );
+      // A refused customer the merchant has not heard of yet: tell the
+      // merchant, so they can see their code reached more than one key.
       if (notice) {
-        await this.notifyMerchant(notice, message.code, target.recipientPubkey, CONFLICT_NOTICE);
+        await this.notifyMerchant(notice, message.code, CONFLICT_NOTICE);
       }
       return;
     }
@@ -346,7 +348,10 @@ export class ReGBYBroker {
       REPLY_INTENT.request_regby_content,
       result.content,
       { event: 'redeem', code: message.code, content: result.content, ...(result.repeat ? { reason: 'repeat' } : {}) },
-      { extraTags: result.origin ? [[FROM_TAG, result.origin.merchantPubkey]] : [], ...replyTime(result.notice) },
+      {
+        extraTags: result.origin ? [[FROM_TAG, result.origin.merchantPubkey]] : [],
+        ...replyTime(result.notice),
+      },
     );
     if (!delivered) {
       logger.warn('Code consumed but its reply reached no relay', {
@@ -357,9 +362,10 @@ export class ReGBYBroker {
     // on screen. Sent whether or not that reply landed: the code is burnt
     // either way, and the merchant must know it is gone to re-mint.
     if (result.notice) {
-      await this.notifyMerchant(result.notice, message.code, target.recipientPubkey, {
+      await this.notifyMerchant(result.notice, message.code, {
         intent: CONTENT_DELIVERED_INTENT,
         content: result.content,
+        extraTags: [[TO_TAG, target.recipientPubkey]],
         record: { content: result.content },
       });
     }
@@ -367,15 +373,14 @@ export class ReGBYBroker {
 
   /**
    * Tell the merchant a customer sent their code, on the thread of their own
-   * request: delivered (with the content) for the one who got it, a conflict
-   * for each one refused after. Stamped with the store's `notice.at`, not
-   * publish time, so the notices of a code keep the order their customers
-   * arrived in, each listed after the customer's own reply.
+   * request: delivered (with the content, `to` the customer) for the one who
+   * got it, a bare conflict for each one refused after. Stamped with the
+   * store's `notice.at`, not publish time, so the notices of a code keep the
+   * order their customers arrived in, each listed after the customer's own reply.
    */
   private async notifyMerchant(
     notice: MerchantNotice,
     code: string,
-    customerPubkey: string,
     message: MerchantMessage,
   ): Promise<void> {
     const target: ReplyTarget = {
@@ -387,7 +392,7 @@ export class ReGBYBroker {
       message.intent,
       message.content,
       { event: 'merchant_notified', code, ...message.record },
-      { extraTags: [[TO_TAG, customerPubkey]], createdAt: notice.at },
+      { extraTags: message.extraTags, createdAt: notice.at },
     );
     if (!delivered) {
       logger.warn('Merchant notice reached no relay', {
